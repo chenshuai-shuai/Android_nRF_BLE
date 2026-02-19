@@ -41,6 +41,21 @@ interface Blinky {
     val rxMessages: StateFlow<List<String>>
 
     /**
+     * Audio stream statistics.
+     */
+    val audioStats: StateFlow<AudioStats>
+
+    /**
+     * Recording state.
+     */
+    val recording: StateFlow<Boolean>
+
+    /**
+     * Last saved recording path.
+     */
+    val lastSavedPath: StateFlow<String?>
+
+    /**
      * Controls the LED state.
      *
      * @param state the new state of the LED.
@@ -53,4 +68,14 @@ interface Blinky {
      * @param text message to send.
      */
     suspend fun sendMessage(text: String)
+
+    /**
+     * Start audio recording.
+     */
+    suspend fun startRecording()
+
+    /**
+     * Stop audio recording and save to WAV file.
+     */
+    suspend fun stopRecording()
 }

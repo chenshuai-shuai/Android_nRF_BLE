@@ -58,6 +58,16 @@ class BlinkyViewModel @Inject constructor(
     val rxMessages = repository.rxMessages
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
+    /** Audio stream stats. */
+    val audioStats = repository.audioStats
+        .stateIn(viewModelScope, SharingStarted.Lazily, no.nordicsemi.android.blinky.spec.AudioStats())
+
+    val recording = repository.recording
+        .stateIn(viewModelScope, SharingStarted.Lazily, false)
+
+    val lastSavedPath = repository.lastSavedPath
+        .stateIn(viewModelScope, SharingStarted.Lazily, null)
+
     init {
         // In this sample we want to connect to the device as soon as the view model is created.
         connect()
@@ -93,6 +103,20 @@ class BlinkyViewModel @Inject constructor(
         val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
         viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
             repository.sendMessage(text)
+        }
+    }
+
+    fun startRecording() {
+        val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
+            repository.startRecording()
+        }
+    }
+
+    fun stopRecording() {
+        val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
+            repository.stopRecording()
         }
     }
 

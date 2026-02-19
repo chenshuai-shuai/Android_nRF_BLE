@@ -63,6 +63,15 @@ class BlinkyRepository @Inject constructor(
     override val rxMessages: StateFlow<List<String>>
         get() = blinky.rxMessages
 
+    override val audioStats: StateFlow<no.nordicsemi.android.blinky.spec.AudioStats>
+        get() = blinky.audioStats
+
+    override val recording: StateFlow<Boolean>
+        get() = blinky.recording
+
+    override val lastSavedPath: StateFlow<String?>
+        get() = blinky.lastSavedPath
+
     override fun release() {
         Timber.uproot(tree)
         blinky.release()

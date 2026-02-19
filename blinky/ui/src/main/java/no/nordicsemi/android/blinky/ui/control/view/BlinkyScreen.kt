@@ -64,6 +64,9 @@ internal fun BlinkyScreen(
                 }
                 Blinky.State.READY -> {
                     val rxMessages by viewModel.rxMessages.collectAsStateWithLifecycle()
+                    val audioStats by viewModel.audioStats.collectAsStateWithLifecycle()
+                    val recording by viewModel.recording.collectAsStateWithLifecycle()
+                    val lastSavedPath by viewModel.lastSavedPath.collectAsStateWithLifecycle()
                     var message by remember { mutableStateOf("") }
 
                     Column(
@@ -71,6 +74,21 @@ internal fun BlinkyScreen(
                             .widthIn(max = 460.dp)
                             .padding(16.dp)
                     ) {
+                        Text(text = "Audio Stats")
+                        Text(text = "Packets: ${audioStats.packets}  Bytes: ${audioStats.bytes}")
+                        Text(text = "Frames: ${audioStats.frames}  Dropped: ${audioStats.droppedFrames}")
+                        Text(text = "Last Seq: ${audioStats.lastSeq}")
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(text = "Recording: ${if (recording) "ON" else "OFF"} (auto)")
+                        if (lastSavedPath != null) {
+                            Text(text = "Saved: $lastSavedPath")
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = { viewModel.stopRecording() },
+                            enabled = recording
+                        ) { Text(text = "Stop & Save") }
+                        Spacer(modifier = Modifier.height(12.dp))
                         Text(text = "NRF Messages")
                         if (rxMessages.isEmpty()) {
                             Text(text = "(no messages)")
