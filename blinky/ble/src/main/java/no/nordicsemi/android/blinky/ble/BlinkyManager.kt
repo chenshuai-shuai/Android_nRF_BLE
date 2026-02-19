@@ -17,6 +17,7 @@ import no.nordicsemi.android.blinky.ble.data.ButtonCallback
 import no.nordicsemi.android.blinky.ble.data.ButtonState
 import no.nordicsemi.android.blinky.ble.data.LedCallback
 import no.nordicsemi.android.blinky.ble.data.LedData
+import no.nordicsemi.android.ble.data.Data
 import no.nordicsemi.android.blinky.spec.Blinky
 import no.nordicsemi.android.blinky.spec.BlinkySpec
 import timber.log.Timber
@@ -32,6 +33,7 @@ private class BlinkyManagerImpl(
 ): BleManager(context), Blinky {
     private val scope = CoroutineScope(Dispatchers.IO)
 
+    // Re-map: LED -> RX (write without response), Button -> TX (notify)
     private var ledCharacteristic: BluetoothGattCharacteristic? = null
     private var buttonCharacteristic: BluetoothGattCharacteristic? = null
 
@@ -40,6 +42,9 @@ private class BlinkyManagerImpl(
 
     private val _buttonState = MutableStateFlow(false)
     override val buttonState = _buttonState.asStateFlow()
+
+    private val _rxMessages = MutableStateFlow<List<String>>(emptyList())
+    override val rxMessages = _rxMessages.asStateFlow()
 
     override val state = stateAsFlow()
         .map {
@@ -56,8 +61,11 @@ private class BlinkyManagerImpl(
 
     private val buttonCallback by lazy {
         object : ButtonCallback() {
-            override fun onButtonStateChanged(device: BluetoothDevice, state: Boolean) {
-                _buttonState.tryEmit(state)
+            override fun onMessageReceived(device: BluetoothDevice, data: Data) {
+                val text = data.getStringValue(0) ?: ""
+                if (text.isNotEmpty()) {
+                    _rxMessages.value = _rxMessages.value + text
+                }
             }
         }
     }
@@ -92,14 +100,13 @@ private class BlinkyManagerImpl(
     }
 
     override suspend fun turnLed(state: Boolean) {
-        // Write the value to the characteristic.
+        // Keep legacy behavior for now, but send as Write Without Response.
         writeCharacteristic(
             ledCharacteristic,
             LedData.from(state),
-            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         ).suspend()
 
-        // Update the state flow with the new value.
         _ledState.value = state
     }
 
@@ -114,17 +121,14 @@ private class BlinkyManagerImpl(
     }
 
     override fun isRequiredServiceSupported(gatt: BluetoothGatt): Boolean {
-        // Get the LBS Service from the gatt object.
+        // Get the custom BLE service from the gatt object.
         gatt.getService(BlinkySpec.BLINKY_SERVICE_UUID)?.apply {
-            // Get the LED characteristic.
+            // RX characteristic (Write Without Response).
             ledCharacteristic = getCharacteristic(
                 BlinkySpec.BLINKY_LED_CHARACTERISTIC_UUID,
-                // Mind, that below we pass required properties.
-                // If your implementation supports only WRITE_NO_RESPONSE,
-                // change the property to BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE.
-                BluetoothGattCharacteristic.PROPERTY_WRITE
+                BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE
             )
-            // Get the Button characteristic.
+            // TX characteristic (Notify).
             buttonCharacteristic = getCharacteristic(
                 BlinkySpec.BLINKY_BUTTON_CHARACTERISTIC_UUID,
                 BluetoothGattCharacteristic.PROPERTY_NOTIFY
@@ -138,31 +142,33 @@ private class BlinkyManagerImpl(
 
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun initialize() {
-        // Enable notifications for the button characteristic.
+        // Enable notifications for the TX characteristic (from nRF to App).
         val flow: Flow<ButtonState> = setNotificationCallback(buttonCharacteristic)
             .asValidResponseFlow()
 
-        // Forward the button state to the buttonState flow.
         scope.launch {
-            flow.map { it.state }.collect { _buttonState.tryEmit(it) }
+            flow.map { it.text }.collect { text ->
+                if (text.isNotEmpty()) {
+                    _rxMessages.value = _rxMessages.value + text
+                }
+            }
         }
 
-        enableNotifications(buttonCharacteristic)
-            .enqueue()
-
-        // Read the initial value of the button characteristic.
-        readCharacteristic(buttonCharacteristic)
-            .with(buttonCallback)
-            .enqueue()
-
-        // Read the initial value of the LED characteristic.
-        readCharacteristic(ledCharacteristic)
-            .with(ledCallback)
-            .enqueue()
+        enableNotifications(buttonCharacteristic).enqueue()
     }
 
     override fun onServicesInvalidated() {
         ledCharacteristic = null
         buttonCharacteristic = null
+    }
+
+    override suspend fun sendMessage(text: String) {
+        if (text.isEmpty()) return
+        val data = text.encodeToByteArray()
+        writeCharacteristic(
+            ledCharacteristic,
+            data,
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        ).suspend()
     }
 }

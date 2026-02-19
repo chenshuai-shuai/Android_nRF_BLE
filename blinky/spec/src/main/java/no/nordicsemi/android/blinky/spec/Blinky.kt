@@ -36,9 +36,21 @@ interface Blinky {
     val buttonState: StateFlow<Boolean>
 
     /**
+     * Received messages from device.
+     */
+    val rxMessages: StateFlow<List<String>>
+
+    /**
      * Controls the LED state.
      *
      * @param state the new state of the LED.
      */
     suspend fun turnLed(state: Boolean)
+
+    /**
+     * Sends a UTF-8 message to the device.
+     *
+     * @param text message to send.
+     */
+    suspend fun sendMessage(text: String)
 }

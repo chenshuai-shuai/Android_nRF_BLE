@@ -54,6 +54,10 @@ class BlinkyViewModel @Inject constructor(
         }
         .stateIn(viewModelScope, SharingStarted.Lazily, false)
 
+    /** RX messages from device. */
+    val rxMessages = repository.rxMessages
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
     init {
         // In this sample we want to connect to the device as soon as the view model is created.
         connect()
@@ -82,6 +86,13 @@ class BlinkyViewModel @Inject constructor(
             // Just like above, when this method throws an exception, it will be caught by the
             // exception handler and ignored.
             repository.turnLed(on)
+        }
+    }
+
+    fun sendMessage(text: String) {
+        val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
+            repository.sendMessage(text)
         }
     }
 

@@ -3,6 +3,7 @@ package no.nordicsemi.android.blinky.ui.control.repository
 import android.content.Context
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.onEach
 import no.nordicsemi.android.blinky.spec.Blinky
 import no.nordicsemi.android.log.ILogSession
@@ -53,12 +54,14 @@ class BlinkyRepository @Inject constructor(
 
     val loggedButtonState: Flow<Boolean>
         get() = blinky.buttonState.onEach {
-            // The same applies here.
             when(it) {
                 true -> Timber.log(LogContract.Log.Level.APPLICATION, "Button pressed")
                 false -> Timber.log(LogContract.Log.Level.APPLICATION, "Button released")
             }
         }
+
+    override val rxMessages: StateFlow<List<String>>
+        get() = blinky.rxMessages
 
     override fun release() {
         Timber.uproot(tree)
