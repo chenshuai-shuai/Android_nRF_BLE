@@ -56,6 +56,16 @@ interface Blinky {
     val lastSavedPath: StateFlow<String?>
 
     /**
+     * gRPC connection state.
+     */
+    val grpcState: StateFlow<String>
+
+    /**
+     * Last gRPC message (summary).
+     */
+    val grpcLastMessage: StateFlow<String?>
+
+    /**
      * Controls the LED state.
      *
      * @param state the new state of the LED.

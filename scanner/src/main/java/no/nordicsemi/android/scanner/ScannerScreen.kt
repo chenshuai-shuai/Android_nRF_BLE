@@ -49,6 +49,7 @@ fun ScannerScreen(
     uuid: ParcelUuid?,
     cancellable: Boolean = true,
     onResult: (ScannerScreenResult) -> Unit,
+    header: (@Composable () -> Unit)? = null,
     deviceItem: @Composable (DiscoveredBluetoothDevice) -> Unit = {
         DeviceListItem(it.displayName, it.address)
     }
@@ -61,6 +62,7 @@ fun ScannerScreen(
         } else {
             ScannerAppBar(title, isScanning)
         }
+        header?.invoke()
         ScannerView(
             uuid = uuid,
             onScanningStateChanged = { isScanning = it },

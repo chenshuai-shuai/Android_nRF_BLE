@@ -67,6 +67,8 @@ internal fun BlinkyScreen(
                     val audioStats by viewModel.audioStats.collectAsStateWithLifecycle()
                     val recording by viewModel.recording.collectAsStateWithLifecycle()
                     val lastSavedPath by viewModel.lastSavedPath.collectAsStateWithLifecycle()
+                    val grpcState by viewModel.grpcState.collectAsStateWithLifecycle()
+                    val grpcLastMessage by viewModel.grpcLastMessage.collectAsStateWithLifecycle()
                     var message by remember { mutableStateOf("") }
 
                     Column(
@@ -74,6 +76,11 @@ internal fun BlinkyScreen(
                             .widthIn(max = 460.dp)
                             .padding(16.dp)
                     ) {
+                        Text(text = "gRPC Status: $grpcState")
+                        if (grpcLastMessage != null) {
+                            Text(text = "gRPC Last: $grpcLastMessage")
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
                         Text(text = "Audio Stats")
                         Text(text = "Packets: ${audioStats.packets}  Bytes: ${audioStats.bytes}")
                         Text(text = "Frames: ${audioStats.frames}  Dropped: ${audioStats.droppedFrames}")

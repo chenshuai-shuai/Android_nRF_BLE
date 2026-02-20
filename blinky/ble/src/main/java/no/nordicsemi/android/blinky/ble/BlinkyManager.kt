@@ -3,16 +3,8 @@ package no.nordicsemi.android.blinky.ble
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
-import android.content.ContentValues
 import android.content.Context
-import android.os.Environment
-import android.os.SystemClock
-import android.provider.MediaStore
 import android.util.Log
-import java.io.FileOutputStream
-import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
-import android.os.ParcelFileDescriptor
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import no.nordicsemi.android.ble.BleManager
@@ -27,6 +19,7 @@ import no.nordicsemi.android.ble.data.Data
 import no.nordicsemi.android.blinky.spec.Blinky
 import no.nordicsemi.android.blinky.spec.AudioStats
 import no.nordicsemi.android.blinky.spec.BlinkySpec
+import no.nordicsemi.android.blinky.spec.GrpcStatusStore
 import timber.log.Timber
 
 class BlinkyManager(
@@ -62,22 +55,17 @@ private class BlinkyManagerImpl(
     private val _lastSavedPath = MutableStateFlow<String?>(null)
     override val lastSavedPath = _lastSavedPath.asStateFlow()
 
+    override val grpcState = GrpcStatusStore.state
+    override val grpcLastMessage = GrpcStatusStore.lastMessage
+
     private var audioCurrSeq = -1
     private var audioCurrMask = 0
     private var audioCurrFragCnt = 0
     private var audioFragBuf: Array<ByteArray?> = emptyArray()
     private var audioLastCompleteSeq = -1
-    private val frameSamples = 160
-
-    private var wavWriter: WavWriter? = null
     private val sampleRateHz = 16000
     private val channels = 1
     private val bitsPerSample = 16
-    private val autoRecord = true
-    private var pendingUri: android.net.Uri? = null
-    private var recordFirstMs: Long = 0
-    private var recordLastMs: Long = 0
-    private var recordFramesWritten: Long = 0
 
     override val state = stateAsFlow()
         .map {
@@ -156,7 +144,7 @@ private class BlinkyManagerImpl(
     override fun getMinLogPriority(): Int {
         // By default, the library logs only INFO or
         // higher priority messages. You may change it here.
-        return Log.VERBOSE
+        return Log.INFO
     }
 
     override fun isRequiredServiceSupported(gatt: BluetoothGatt): Boolean {
@@ -205,17 +193,12 @@ private class BlinkyManagerImpl(
     }
 
     override suspend fun startRecording() {
-        if (_recording.value) return
-        startRecordingInternal()
+        // Recording to WAV is disabled in this mode (App only forwards).
+        _recording.value = false
+        _lastSavedPath.value = "RECORDING_DISABLED"
     }
 
     override suspend fun stopRecording() {
-        if (!_recording.value) return
-        val writer = wavWriter
-        wavWriter = null
-        writer?.closeWithSampleRate(sampleRateHz)
-        pendingUri?.let { finalizeDownloadUri(context, it) }
-        pendingUri = null
         _recording.value = false
     }
 
@@ -257,21 +240,23 @@ private class BlinkyManagerImpl(
             val maskAll = (1 shl fragCnt) - 1
             if (audioCurrMask == maskAll) {
                 frames++
-                val frameBytes = audioFragBuf.filterNotNull().fold(ByteArray(0)) { acc, b -> acc + b }
+                val parts = audioFragBuf.filterNotNull()
+                var totalLen = 0
+                for (p in parts) {
+                    totalLen += p.size
+                }
+                val frameBytes = ByteArray(totalLen)
+                var offset = 0
+                for (p in parts) {
+                    System.arraycopy(p, 0, frameBytes, offset, p.size)
+                    offset += p.size
+                }
                 if (frameBytes.isNotEmpty()) {
-                    if (autoRecord && !_recording.value) {
-                        startRecordingInternal()
-                    }
-                    val writer = wavWriter
-                    if (writer != null) {
-                        val now = SystemClock.elapsedRealtime()
-                        if (recordFirstMs == 0L) {
-                            recordFirstMs = now
-                        }
-                        writer.write(frameBytes)
-                        recordFramesWritten += 1
-                        recordLastMs = now
-                        audioLastCompleteSeq = seq
+                    audioLastCompleteSeq = seq
+                    val sendSeq = seq.toLong()
+                    val payload = frameBytes
+                    scope.launch {
+                        GrpcAudioClient.sendAudio(payload, sendSeq)
                     }
                 }
                 audioCurrSeq = -1
@@ -292,149 +277,4 @@ private class BlinkyManagerImpl(
         return true
     }
 
-    private fun startRecordingInternal() {
-        if (_recording.value) return
-        val name = "nrf_audio_${System.currentTimeMillis()}.wav"
-        val uri = createDownloadWavUri(context, name)
-        if (uri == null) {
-            _lastSavedPath.value = "ERROR: create download uri failed"
-            return
-        }
-        pendingUri = uri
-        wavWriter = WavWriter(context, uri, sampleRateHz, channels, bitsPerSample)
-        _lastSavedPath.value = uri.toString()
-        _recording.value = true
-        recordFirstMs = 0
-        recordLastMs = 0
-        recordFramesWritten = 0
-    }
-
-    private fun estimateRecordSampleRate(): Int {
-        if (recordFirstMs == 0L || recordLastMs <= recordFirstMs || recordFramesWritten <= 0) {
-            return sampleRateHz
-        }
-        val durationMs = recordLastMs - recordFirstMs
-        if (durationMs < 200) {
-            return sampleRateHz
-        }
-        val totalSamples = recordFramesWritten.toDouble() * frameSamples.toDouble()
-        val rate = (totalSamples * 1000.0 / durationMs.toDouble()).toInt()
-        return rate.coerceIn(8000, 48000)
-    }
-
-    private class WavWriter(
-        context: Context,
-        private val uri: android.net.Uri,
-        private val defaultSampleRate: Int,
-        private val channels: Int,
-        private val bitsPerSample: Int,
-    ) {
-        private val pfd: ParcelFileDescriptor =
-            context.contentResolver.openFileDescriptor(uri, "rw")
-                ?: throw IllegalStateException("openFileDescriptor failed")
-        private val out = FileOutputStream(pfd.fileDescriptor)
-        private val channel: FileChannel = out.channel
-        private var dataSize: Long = 0
-        private var firstWriteMs: Long = 0
-        private var lastWriteMs: Long = 0
-
-        init {
-            channel.truncate(0)
-            writeHeader(0, defaultSampleRate)
-        }
-
-        fun write(data: ByteArray) {
-            if (data.isEmpty()) return
-            val now = SystemClock.elapsedRealtime()
-            if (firstWriteMs == 0L) {
-                firstWriteMs = now
-            }
-            lastWriteMs = now
-            channel.position(44 + dataSize)
-            channel.write(ByteBuffer.wrap(data))
-            dataSize += data.size
-        }
-
-        fun closeWithSampleRate(sampleRate: Int) {
-            val rate = if (sampleRate > 0) sampleRate else defaultSampleRate
-            writeHeader(dataSize, rate)
-            channel.force(true)
-            channel.close()
-            out.close()
-            pfd.close()
-        }
-
-        private fun estimateSampleRate(): Int {
-            if (firstWriteMs == 0L || lastWriteMs <= firstWriteMs) {
-                return defaultSampleRate
-            }
-            val durationMs = lastWriteMs - firstWriteMs
-            if (durationMs < 200) {
-                return defaultSampleRate
-            }
-            val bytesPerSample = (channels * bitsPerSample) / 8
-            if (bytesPerSample <= 0) {
-                return defaultSampleRate
-            }
-            val totalSamples = dataSize.toDouble() / bytesPerSample.toDouble()
-            val rate = (totalSamples * 1000.0 / durationMs.toDouble()).toInt()
-            return rate.coerceIn(8000, 48000)
-        }
-
-        private fun writeHeader(dataLen: Long, sampleRate: Int) {
-            val byteRate = sampleRate * channels * bitsPerSample / 8
-            val blockAlign = channels * bitsPerSample / 8
-            val totalDataLen = dataLen + 36
-
-            channel.position(0)
-            channel.write(ByteBuffer.wrap("RIFF".toByteArray()))
-            channel.write(ByteBuffer.wrap(intToLittleEndian(totalDataLen.toInt())))
-            channel.write(ByteBuffer.wrap("WAVE".toByteArray()))
-            channel.write(ByteBuffer.wrap("fmt ".toByteArray()))
-            channel.write(ByteBuffer.wrap(intToLittleEndian(16)))
-            channel.write(ByteBuffer.wrap(shortToLittleEndian(1)))
-            channel.write(ByteBuffer.wrap(shortToLittleEndian(channels.toShort())))
-            channel.write(ByteBuffer.wrap(intToLittleEndian(sampleRate)))
-            channel.write(ByteBuffer.wrap(intToLittleEndian(byteRate)))
-            channel.write(ByteBuffer.wrap(shortToLittleEndian(blockAlign.toShort())))
-            channel.write(ByteBuffer.wrap(shortToLittleEndian(bitsPerSample.toShort())))
-            channel.write(ByteBuffer.wrap("data".toByteArray()))
-            channel.write(ByteBuffer.wrap(intToLittleEndian(dataLen.toInt())))
-        }
-
-        private fun intToLittleEndian(value: Int): ByteArray {
-            return byteArrayOf(
-                (value and 0xFF).toByte(),
-                ((value shr 8) and 0xFF).toByte(),
-                ((value shr 16) and 0xFF).toByte(),
-                ((value shr 24) and 0xFF).toByte()
-            )
-        }
-
-        private fun shortToLittleEndian(value: Short): ByteArray {
-            return byteArrayOf(
-                (value.toInt() and 0xFF).toByte(),
-                ((value.toInt() shr 8) and 0xFF).toByte()
-            )
-        }
-    }
-
-    private fun createDownloadWavUri(context: Context, displayName: String): android.net.Uri? {
-        val values = ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, displayName)
-            put(MediaStore.Downloads.MIME_TYPE, "audio/wav")
-            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/nrf_audio")
-            put(MediaStore.Downloads.IS_PENDING, 1)
-        }
-        val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
-        return uri
-    }
-
-    private fun finalizeDownloadUri(context: Context, uri: android.net.Uri) {
-        val values = ContentValues().apply {
-            put(MediaStore.Downloads.IS_PENDING, 0)
-        }
-        context.contentResolver.update(uri, values, null, null)
-    }
 }

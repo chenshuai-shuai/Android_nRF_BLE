@@ -3,6 +3,7 @@ plugins {
     alias(libs.plugins.nordic.library)
     // https://github.com/NordicSemiconductor/Android-Gradle-Plugins/blob/main/plugins/src/main/kotlin/AndroidKotlinConventionPlugin.kt
     alias(libs.plugins.nordic.kotlin.android)
+    id("com.google.protobuf") version "0.9.4"
 }
 
 android {
@@ -18,4 +19,36 @@ dependencies {
     implementation(libs.timber)
     // Coroutines
     implementation(libs.kotlinx.coroutines.core)
+
+    // gRPC / Protobuf (lite)
+    implementation("io.grpc:grpc-okhttp:1.62.2")
+    implementation("io.grpc:grpc-protobuf-lite:1.62.2")
+    implementation("io.grpc:grpc-stub:1.62.2")
+    implementation("com.google.protobuf:protobuf-javalite:3.25.3")
+    compileOnly("javax.annotation:javax.annotation-api:1.3.2")
+}
+
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:3.25.3"
+    }
+    plugins {
+        create("grpc") {
+            artifact = "io.grpc:protoc-gen-grpc-java:1.62.2"
+        }
+    }
+    generateProtoTasks {
+        all().forEach { task ->
+            task.builtins {
+                create("java") {
+                    option("lite")
+                }
+            }
+            task.plugins {
+                create("grpc") {
+                    option("lite")
+                }
+            }
+        }
+    }
 }

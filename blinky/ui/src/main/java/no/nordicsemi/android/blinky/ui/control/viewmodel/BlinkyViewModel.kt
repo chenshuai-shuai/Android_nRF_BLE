@@ -68,6 +68,12 @@ class BlinkyViewModel @Inject constructor(
     val lastSavedPath = repository.lastSavedPath
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
+    val grpcState = repository.grpcState
+        .stateIn(viewModelScope, SharingStarted.Lazily, "DISCONNECTED")
+
+    val grpcLastMessage = repository.grpcLastMessage
+        .stateIn(viewModelScope, SharingStarted.Lazily, null)
+
     init {
         // In this sample we want to connect to the device as soon as the view model is created.
         connect()

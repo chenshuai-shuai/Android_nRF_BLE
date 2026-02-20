@@ -72,6 +72,12 @@ class BlinkyRepository @Inject constructor(
     override val lastSavedPath: StateFlow<String?>
         get() = blinky.lastSavedPath
 
+    override val grpcState: StateFlow<String>
+        get() = blinky.grpcState
+
+    override val grpcLastMessage: StateFlow<String?>
+        get() = blinky.grpcLastMessage
+
     override fun release() {
         Timber.uproot(tree)
         blinky.release()
