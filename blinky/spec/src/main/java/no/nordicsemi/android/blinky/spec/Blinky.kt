@@ -66,6 +66,21 @@ interface Blinky {
     val grpcLastMessage: StateFlow<String?>
 
     /**
+     * Conversation state for phone microphone gRPC sessions.
+     */
+    val conversationState: StateFlow<ConversationState>
+
+    /**
+     * Current session ID (null when idle).
+     */
+    val conversationSessionId: StateFlow<String?>
+
+    /**
+     * Remaining seconds while waiting for response (0 when not waiting).
+     */
+    val waitingResponseSeconds: StateFlow<Long>
+
+    /**
      * Controls the LED state.
      *
      * @param state the new state of the LED.
@@ -88,4 +103,24 @@ interface Blinky {
      * Stop audio recording and save to WAV file.
      */
     suspend fun stopRecording()
+
+    /**
+     * Start a new conversation session (generates a new session ID).
+     */
+    suspend fun startConversation()
+
+    /**
+     * Begin sending microphone audio to the active session.
+     */
+    suspend fun startTalking()
+
+    /**
+     * Stop sending microphone audio and wait for server response.
+     */
+    suspend fun stopTalking()
+
+    /**
+     * End the current conversation session and close gRPC.
+     */
+    suspend fun endConversation()
 }

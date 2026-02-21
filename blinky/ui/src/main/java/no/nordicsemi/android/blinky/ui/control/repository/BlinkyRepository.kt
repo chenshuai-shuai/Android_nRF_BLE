@@ -78,8 +78,33 @@ class BlinkyRepository @Inject constructor(
     override val grpcLastMessage: StateFlow<String?>
         get() = blinky.grpcLastMessage
 
+    override val conversationState: StateFlow<no.nordicsemi.android.blinky.spec.ConversationState>
+        get() = blinky.conversationState
+
+    override val conversationSessionId: StateFlow<String?>
+        get() = blinky.conversationSessionId
+
+    override val waitingResponseSeconds: StateFlow<Long>
+        get() = blinky.waitingResponseSeconds
+
     override fun release() {
         Timber.uproot(tree)
         blinky.release()
+    }
+
+    override suspend fun startConversation() {
+        blinky.startConversation()
+    }
+
+    override suspend fun startTalking() {
+        blinky.startTalking()
+    }
+
+    override suspend fun stopTalking() {
+        blinky.stopTalking()
+    }
+
+    override suspend fun endConversation() {
+        blinky.endConversation()
     }
 }

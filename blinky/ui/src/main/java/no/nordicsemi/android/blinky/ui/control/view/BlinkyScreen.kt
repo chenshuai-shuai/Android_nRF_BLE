@@ -1,5 +1,7 @@
 package no.nordicsemi.android.blinky.ui.control.view
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
@@ -20,7 +22,14 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.input.pointer.pointerInteropFilter
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
+import android.Manifest
+import android.content.pm.PackageManager
 import no.nordicsemi.android.blinky.spec.Blinky
+import no.nordicsemi.android.blinky.spec.ConversationState
 import no.nordicsemi.android.blinky.ui.R
 import no.nordicsemi.android.blinky.ui.control.viewmodel.BlinkyViewModel
 import no.nordicsemi.android.common.logger.view.LoggerAppBarIcon
@@ -30,7 +39,7 @@ import no.nordicsemi.android.scanner.view.DeviceConnectingView
 import no.nordicsemi.android.scanner.view.DeviceDisconnectedView
 import no.nordicsemi.android.scanner.view.Reason
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 internal fun BlinkyScreen(
     onNavigateUp: () -> Unit,
@@ -69,13 +78,75 @@ internal fun BlinkyScreen(
                     val lastSavedPath by viewModel.lastSavedPath.collectAsStateWithLifecycle()
                     val grpcState by viewModel.grpcState.collectAsStateWithLifecycle()
                     val grpcLastMessage by viewModel.grpcLastMessage.collectAsStateWithLifecycle()
+                    val conversationState by viewModel.conversationState.collectAsStateWithLifecycle()
+                    val sessionId by viewModel.conversationSessionId.collectAsStateWithLifecycle()
+                    val waitingSeconds by viewModel.waitingResponseSeconds.collectAsStateWithLifecycle()
                     var message by remember { mutableStateOf("") }
+                    val context = LocalContext.current
+                    val permissionLauncher = rememberLauncherForActivityResult(
+                        contract = ActivityResultContracts.RequestPermission()
+                    ) { granted ->
+                        if (granted) {
+                            viewModel.startConversation()
+                            viewModel.startTalking()
+                        }
+                    }
 
                     Column(
                         modifier = Modifier
                             .widthIn(max = 460.dp)
                             .padding(16.dp)
                     ) {
+                        Text(text = "Conversation: $conversationState")
+                        if (sessionId != null) {
+                            Text(text = "Session: $sessionId")
+                        }
+                        if (conversationState == ConversationState.WAITING_RESPONSE) {
+                            Text(text = "Waiting reply: ${waitingSeconds}s")
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        val canTalk = conversationState == ConversationState.READY ||
+                            conversationState == ConversationState.IDLE
+                        val waiting = conversationState == ConversationState.WAITING_RESPONSE
+                        val isTalking = conversationState == ConversationState.TALKING
+                        val buttonLabel = when {
+                            waiting -> "Waiting for reply..."
+                            isTalking -> "Release to send"
+                            else -> "Hold to talk"
+                        }
+                        Button(
+                            onClick = {},
+                            enabled = canTalk,
+                            modifier = Modifier
+                                .padding(bottom = 8.dp)
+                                .pointerInteropFilter { event ->
+                                    if (!canTalk) return@pointerInteropFilter true
+                                    when (event.action) {
+                                        android.view.MotionEvent.ACTION_DOWN -> {
+                                            val granted = ContextCompat.checkSelfPermission(
+                                                context,
+                                                Manifest.permission.RECORD_AUDIO
+                                            ) == PackageManager.PERMISSION_GRANTED
+                                            if (!granted) {
+                                                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                            } else {
+                                                viewModel.startConversation()
+                                                viewModel.startTalking()
+                                            }
+                                        }
+                                        android.view.MotionEvent.ACTION_UP,
+                                        android.view.MotionEvent.ACTION_CANCEL -> {
+                                            if (conversationState == ConversationState.TALKING) {
+                                                viewModel.stopTalking()
+                                            }
+                                        }
+                                    }
+                                    true
+                                }
+                        ) {
+                            Text(text = buttonLabel)
+                        }
+
                         Text(text = "gRPC Status: $grpcState")
                         if (grpcLastMessage != null) {
                             Text(text = "gRPC Last: $grpcLastMessage")

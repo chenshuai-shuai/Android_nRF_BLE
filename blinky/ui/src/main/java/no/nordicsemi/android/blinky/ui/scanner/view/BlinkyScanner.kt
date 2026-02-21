@@ -19,6 +19,7 @@ import no.nordicsemi.android.scanner.ScannerScreen
 
 @Composable
 fun BlinkyScanner(
+    onConversation: () -> Unit,
     onDeviceSelected: (BluetoothDevice, String?) -> Unit,
 ) {
     ScannerScreen(
@@ -30,6 +31,12 @@ fun BlinkyScanner(
             val grpcLast by GrpcStatusStore.lastMessage.collectAsStateWithLifecycle()
             val grpcDropped by GrpcStatusStore.droppedPackets.collectAsStateWithLifecycle()
             Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                androidx.compose.material3.Button(
+                    onClick = onConversation,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                ) {
+                    Text(text = "Realtime Conversation")
+                }
                 Text(text = "gRPC: $grpcState")
                 if (grpcLast != null) {
                     Text(text = "gRPC Last: $grpcLast")

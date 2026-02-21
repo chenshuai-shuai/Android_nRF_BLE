@@ -10,6 +10,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":blinky:ble"))
     implementation(project(":blinky:spec"))
     implementation(project(":scanner"))
 

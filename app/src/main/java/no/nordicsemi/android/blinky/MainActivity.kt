@@ -3,6 +3,7 @@ package no.nordicsemi.android.blinky
 import android.os.Bundle
 import androidx.activity.compose.setContent
 import dagger.hilt.android.AndroidEntryPoint
+import no.nordicsemi.android.blinky.ui.conversation.ConversationDestination
 import no.nordicsemi.android.blinky.ui.control.BlinkyDestination
 import no.nordicsemi.android.blinky.ui.scanner.ScannerDestination
 import no.nordicsemi.android.common.navigation.NavigationView
@@ -17,7 +18,7 @@ class MainActivity: NordicActivity() {
 
         setContent {
             NordicTheme {
-                NavigationView(ScannerDestination + BlinkyDestination)
+                NavigationView(ScannerDestination + BlinkyDestination + ConversationDestination)
             }
         }
     }

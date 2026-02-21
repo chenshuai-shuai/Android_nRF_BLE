@@ -74,6 +74,15 @@ class BlinkyViewModel @Inject constructor(
     val grpcLastMessage = repository.grpcLastMessage
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
+    val conversationState = repository.conversationState
+        .stateIn(viewModelScope, SharingStarted.Lazily, no.nordicsemi.android.blinky.spec.ConversationState.IDLE)
+
+    val conversationSessionId = repository.conversationSessionId
+        .stateIn(viewModelScope, SharingStarted.Lazily, null)
+
+    val waitingResponseSeconds = repository.waitingResponseSeconds
+        .stateIn(viewModelScope, SharingStarted.Lazily, 0L)
+
     init {
         // In this sample we want to connect to the device as soon as the view model is created.
         connect()
@@ -123,6 +132,34 @@ class BlinkyViewModel @Inject constructor(
         val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
         viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
             repository.stopRecording()
+        }
+    }
+
+    fun startConversation() {
+        val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
+            repository.startConversation()
+        }
+    }
+
+    fun startTalking() {
+        val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
+            repository.startTalking()
+        }
+    }
+
+    fun stopTalking() {
+        val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
+            repository.stopTalking()
+        }
+    }
+
+    fun endConversation() {
+        val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
+            repository.endConversation()
         }
     }
 

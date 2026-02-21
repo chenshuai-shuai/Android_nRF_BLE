@@ -4,6 +4,10 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
 import android.content.Context
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.AudioTrack
+import android.media.MediaRecorder
 import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -19,6 +23,7 @@ import no.nordicsemi.android.ble.data.Data
 import no.nordicsemi.android.blinky.spec.Blinky
 import no.nordicsemi.android.blinky.spec.AudioStats
 import no.nordicsemi.android.blinky.spec.BlinkySpec
+import no.nordicsemi.android.blinky.spec.ConversationState
 import no.nordicsemi.android.blinky.spec.GrpcStatusStore
 import timber.log.Timber
 
@@ -58,12 +63,32 @@ private class BlinkyManagerImpl(
     override val grpcState = GrpcStatusStore.state
     override val grpcLastMessage = GrpcStatusStore.lastMessage
 
+    private val _conversationState = MutableStateFlow(ConversationState.IDLE)
+    override val conversationState = _conversationState.asStateFlow()
+    private val _conversationSessionId = MutableStateFlow<String?>(null)
+    override val conversationSessionId = _conversationSessionId.asStateFlow()
+    private val _waitingResponseSeconds = MutableStateFlow(0L)
+    override val waitingResponseSeconds = _waitingResponseSeconds.asStateFlow()
+
+    private var sessionId: String? = null
+    private var sessionStartMs: Long = 0L
+    private var lastSpeechMs: Long = 0L
+    private var idleTimeoutMs: Long = 5 * 60 * 1000L
+    private var maxSessionMs: Long = 55 * 60 * 1000L
+    private var waitingTimeoutMs: Long = 30 * 1000L
+    private var waitingJob: Job? = null
+    private var sessionJob: Job? = null
+    private var talkJob: Job? = null
+    private var audioRecord: AudioRecord? = null
+    private var audioTrack: AudioTrack? = null
+    private var talkSeq: Long = 1L
+
     private var audioCurrSeq = -1
     private var audioCurrMask = 0
     private var audioCurrFragCnt = 0
     private var audioFragBuf: Array<ByteArray?> = emptyArray()
     private var audioLastCompleteSeq = -1
-    private val sampleRateHz = 16000
+    private val sampleRateHz = 24000
     private val channels = 1
     private val bitsPerSample = 16
 
@@ -114,6 +139,18 @@ private class BlinkyManagerImpl(
     override fun release() {
         // Cancel all coroutines.
         scope.cancel()
+        sessionJob?.cancel()
+        sessionJob = null
+        waitingJob?.cancel()
+        waitingJob = null
+        stopMicCapture()
+        releaseAudioTrack()
+        sessionId?.let { GrpcAudioClient.endConversation(it) }
+        GrpcAudioClient.close()
+        sessionId = null
+        _conversationSessionId.value = null
+        _waitingResponseSeconds.value = 0L
+        _conversationState.value = ConversationState.IDLE
 
         val wasConnected = isReady
         // If the device wasn't connected, it means that ConnectRequest was still pending.
@@ -175,6 +212,9 @@ private class BlinkyManagerImpl(
 
         requestMtu(247).enqueue()
         requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH).enqueue()
+
+        // Align gRPC audio format with nRF mic settings (16kHz, mono, 16-bit).
+        GrpcAudioClient.configure(sampleRateHz, channels, bitsPerSample)
     }
 
     override fun onServicesInvalidated() {
@@ -200,6 +240,69 @@ private class BlinkyManagerImpl(
 
     override suspend fun stopRecording() {
         _recording.value = false
+    }
+
+    override suspend fun startConversation() {
+        if (_conversationState.value != ConversationState.IDLE) return
+        sessionId = "session_${System.currentTimeMillis()}"
+        _conversationSessionId.value = sessionId
+        sessionStartMs = System.currentTimeMillis()
+        lastSpeechMs = sessionStartMs
+        _conversationState.value = ConversationState.CONNECTING
+        ensureAudioTrack()
+        GrpcAudioClient.startSession(sessionId!!)
+        GrpcAudioClient.setAudioOutputListener { pcm ->
+            playAudio(pcm)
+        }
+        GrpcAudioClient.setAudioCompleteListener {
+            if (_conversationState.value == ConversationState.WAITING_RESPONSE) {
+                _conversationState.value = ConversationState.READY
+                _waitingResponseSeconds.value = 0L
+            }
+        }
+        GrpcAudioClient.setErrorListener { msg ->
+            Timber.e("gRPC error: %s", msg)
+        }
+        startSessionWatchdog()
+        _conversationState.value = ConversationState.READY
+    }
+
+    override suspend fun startTalking() {
+        val state = _conversationState.value
+        if (state != ConversationState.READY) return
+        if (sessionId == null) {
+            startConversation()
+        }
+        _conversationState.value = ConversationState.TALKING
+        lastSpeechMs = System.currentTimeMillis()
+        startMicCapture()
+    }
+
+    override suspend fun stopTalking() {
+        if (_conversationState.value != ConversationState.TALKING) return
+        stopMicCapture()
+        lastSpeechMs = System.currentTimeMillis()
+        _conversationState.value = ConversationState.WAITING_RESPONSE
+        startWaitingCountdown()
+    }
+
+    override suspend fun endConversation() {
+        if (_conversationState.value == ConversationState.IDLE) return
+        stopMicCapture()
+        sessionJob?.cancel()
+        sessionJob = null
+        waitingJob?.cancel()
+        waitingJob = null
+        _waitingResponseSeconds.value = 0L
+        val id = sessionId
+        sessionId = null
+        _conversationSessionId.value = null
+        _conversationState.value = ConversationState.IDLE
+        if (id != null) {
+            GrpcAudioClient.endConversation(id)
+        }
+        GrpcAudioClient.close()
+        releaseAudioTrack()
     }
 
     private fun handleAudioPacket(bytes: ByteArray): Boolean {
@@ -275,6 +378,105 @@ private class BlinkyManagerImpl(
         )
         _audioStats.value = stats
         return true
+    }
+
+    private fun startSessionWatchdog() {
+        if (sessionJob?.isActive == true) return
+        sessionJob = scope.launch {
+            while (true) {
+                delay(1000L)
+                if (_conversationState.value == ConversationState.IDLE) continue
+                val now = System.currentTimeMillis()
+                val idle = now - lastSpeechMs
+                val age = now - sessionStartMs
+                if (idle > idleTimeoutMs || age > maxSessionMs) {
+                    Timber.i("Ending session: idle=%dms age=%dms", idle, age)
+                    endConversation()
+                }
+            }
+        }
+    }
+
+    private fun startWaitingCountdown() {
+        waitingJob?.cancel()
+        waitingJob = scope.launch {
+            var remaining = waitingTimeoutMs / 1000L
+            _waitingResponseSeconds.value = remaining
+            while (remaining > 0 && _conversationState.value == ConversationState.WAITING_RESPONSE) {
+                delay(1000L)
+                remaining -= 1
+                _waitingResponseSeconds.value = remaining
+            }
+            if (_conversationState.value != ConversationState.WAITING_RESPONSE) {
+                _waitingResponseSeconds.value = 0L
+            }
+        }
+    }
+
+    private fun startMicCapture() {
+        if (talkJob?.isActive == true) return
+        val minBuf = AudioRecord.getMinBufferSize(
+            sampleRateHz,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        ).coerceAtLeast(sampleRateHz / 50 * 2)
+        audioRecord = AudioRecord(
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            sampleRateHz,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            minBuf
+        )
+        audioRecord?.startRecording()
+        talkJob = scope.launch {
+            val buffer = ByteArray(minBuf)
+            while (isActive && _conversationState.value == ConversationState.TALKING) {
+                val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                if (read > 0) {
+                    val pcm = buffer.copyOf(read)
+                    GrpcAudioClient.sendAudio(pcm, talkSeq++)
+                }
+            }
+        }
+    }
+
+    private fun stopMicCapture() {
+        talkJob?.cancel()
+        talkJob = null
+        audioRecord?.stop()
+        audioRecord?.release()
+        audioRecord = null
+    }
+
+    private fun ensureAudioTrack() {
+        if (audioTrack != null) return
+        val minBuf = AudioTrack.getMinBufferSize(
+            sampleRateHz,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        ).coerceAtLeast(sampleRateHz / 50 * 2)
+        audioTrack = AudioTrack.Builder()
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setSampleRate(sampleRateHz)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .build()
+            )
+            .setBufferSizeInBytes(minBuf)
+            .build()
+        audioTrack?.play()
+    }
+
+    private fun playAudio(pcm: ByteArray) {
+        val track = audioTrack ?: return
+        track.write(pcm, 0, pcm.size)
+    }
+
+    private fun releaseAudioTrack() {
+        audioTrack?.stop()
+        audioTrack?.release()
+        audioTrack = null
     }
 
 }
