@@ -89,8 +89,10 @@ private class BlinkyManagerImpl(
     private var audioFragBuf: Array<ByteArray?> = emptyArray()
     private var audioLastCompleteSeq = -1
     private val sampleRateHz = 24000
+    private val nrfSampleRateHz = 16000
     private val channels = 1
     private val bitsPerSample = 16
+    private val useBleMic = true
 
     override val state = stateAsFlow()
         .map {
@@ -143,7 +145,9 @@ private class BlinkyManagerImpl(
         sessionJob = null
         waitingJob?.cancel()
         waitingJob = null
-        stopMicCapture()
+        if (!useBleMic) {
+            stopMicCapture()
+        }
         releaseAudioTrack()
         sessionId?.let { GrpcAudioClient.endConversation(it) }
         GrpcAudioClient.close()
@@ -251,6 +255,7 @@ private class BlinkyManagerImpl(
         _conversationState.value = ConversationState.CONNECTING
         ensureAudioTrack()
         GrpcAudioClient.startSession(sessionId!!)
+        sendPrimerFrame()
         GrpcAudioClient.setAudioOutputListener { pcm ->
             playAudio(pcm)
         }
@@ -275,12 +280,16 @@ private class BlinkyManagerImpl(
         }
         _conversationState.value = ConversationState.TALKING
         lastSpeechMs = System.currentTimeMillis()
-        startMicCapture()
+        if (!useBleMic) {
+            startMicCapture()
+        }
     }
 
     override suspend fun stopTalking() {
         if (_conversationState.value != ConversationState.TALKING) return
-        stopMicCapture()
+        if (!useBleMic) {
+            stopMicCapture()
+        }
         lastSpeechMs = System.currentTimeMillis()
         _conversationState.value = ConversationState.WAITING_RESPONSE
         startWaitingCountdown()
@@ -357,9 +366,15 @@ private class BlinkyManagerImpl(
                 if (frameBytes.isNotEmpty()) {
                     audioLastCompleteSeq = seq
                     val sendSeq = seq.toLong()
-                    val payload = frameBytes
+                    val payload = if (nrfSampleRateHz == sampleRateHz) {
+                        frameBytes
+                    } else {
+                        resample16kTo24k(frameBytes)
+                    }
                     scope.launch {
-                        GrpcAudioClient.sendAudio(payload, sendSeq)
+                        if (_conversationState.value == ConversationState.TALKING) {
+                            GrpcAudioClient.sendAudio(payload, sendSeq)
+                        }
                     }
                 }
                 audioCurrSeq = -1
@@ -378,6 +393,43 @@ private class BlinkyManagerImpl(
         )
         _audioStats.value = stats
         return true
+    }
+
+    private fun sendPrimerFrame() {
+        val frameSamples = (sampleRateHz / 50).coerceAtLeast(1) // 20ms
+        val frameBytes = frameSamples * channels * (bitsPerSample / 8)
+        val pcm = ByteArray(frameBytes)
+        GrpcAudioClient.sendAudio(pcm, 0L)
+    }
+
+    private fun resample16kTo24k(pcm16: ByteArray): ByteArray {
+        if (pcm16.size < 2) return pcm16
+        val samples = pcm16.size / 2
+        val outSamples = samples * 3 / 2
+        val out = ByteArray(outSamples * 2)
+        var outIdx = 0
+        var i = 0
+        fun getSample(idx: Int): Int {
+            val lo = pcm16[idx * 2].toInt() and 0xFF
+            val hi = pcm16[idx * 2 + 1].toInt()
+            return (hi shl 8) or lo
+        }
+        while (i < samples - 1) {
+            val s0 = getSample(i).toShort()
+            val s1 = getSample(i + 1).toShort()
+            out[outIdx++] = (s0.toInt() and 0xFF).toByte()
+            out[outIdx++] = ((s0.toInt() shr 8) and 0xFF).toByte()
+            if (i % 2 == 0) {
+                val mid = ((s0.toInt() + s1.toInt()) / 2).toShort()
+                out[outIdx++] = (mid.toInt() and 0xFF).toByte()
+                out[outIdx++] = ((mid.toInt() shr 8) and 0xFF).toByte()
+            }
+            i++
+        }
+        val last = getSample(samples - 1).toShort()
+        out[outIdx++] = (last.toInt() and 0xFF).toByte()
+        out[outIdx++] = ((last.toInt() shr 8) and 0xFF).toByte()
+        return if (outIdx == out.size) out else out.copyOf(outIdx)
     }
 
     private fun startSessionWatchdog() {

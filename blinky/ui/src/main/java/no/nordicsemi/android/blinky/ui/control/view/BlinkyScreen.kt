@@ -1,7 +1,5 @@
 package no.nordicsemi.android.blinky.ui.control.view
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
@@ -24,10 +22,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.input.pointer.pointerInteropFilter
-import androidx.compose.ui.platform.LocalContext
-import androidx.core.content.ContextCompat
-import android.Manifest
-import android.content.pm.PackageManager
 import no.nordicsemi.android.blinky.spec.Blinky
 import no.nordicsemi.android.blinky.spec.ConversationState
 import no.nordicsemi.android.blinky.ui.R
@@ -82,15 +76,6 @@ internal fun BlinkyScreen(
                     val sessionId by viewModel.conversationSessionId.collectAsStateWithLifecycle()
                     val waitingSeconds by viewModel.waitingResponseSeconds.collectAsStateWithLifecycle()
                     var message by remember { mutableStateOf("") }
-                    val context = LocalContext.current
-                    val permissionLauncher = rememberLauncherForActivityResult(
-                        contract = ActivityResultContracts.RequestPermission()
-                    ) { granted ->
-                        if (granted) {
-                            viewModel.startConversation()
-                            viewModel.startTalking()
-                        }
-                    }
 
                     Column(
                         modifier = Modifier
@@ -123,16 +108,8 @@ internal fun BlinkyScreen(
                                     if (!canTalk) return@pointerInteropFilter true
                                     when (event.action) {
                                         android.view.MotionEvent.ACTION_DOWN -> {
-                                            val granted = ContextCompat.checkSelfPermission(
-                                                context,
-                                                Manifest.permission.RECORD_AUDIO
-                                            ) == PackageManager.PERMISSION_GRANTED
-                                            if (!granted) {
-                                                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                            } else {
-                                                viewModel.startConversation()
-                                                viewModel.startTalking()
-                                            }
+                                            viewModel.startConversation()
+                                            viewModel.startTalking()
                                         }
                                         android.view.MotionEvent.ACTION_UP,
                                         android.view.MotionEvent.ACTION_CANCEL -> {
