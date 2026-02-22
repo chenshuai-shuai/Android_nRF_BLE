@@ -75,6 +75,7 @@ internal fun BlinkyScreen(
                     val conversationState by viewModel.conversationState.collectAsStateWithLifecycle()
                     val sessionId by viewModel.conversationSessionId.collectAsStateWithLifecycle()
                     val waitingSeconds by viewModel.waitingResponseSeconds.collectAsStateWithLifecycle()
+                    val sessionReady by viewModel.conversationSessionReady.collectAsStateWithLifecycle()
                     var message by remember { mutableStateOf("") }
 
                     Column(
@@ -86,17 +87,20 @@ internal fun BlinkyScreen(
                         if (sessionId != null) {
                             Text(text = "Session: $sessionId")
                         }
+                        Text(text = "Session Ready: ${if (sessionReady) "YES" else "NO"}")
                         if (conversationState == ConversationState.WAITING_RESPONSE) {
                             Text(text = "Waiting reply: ${waitingSeconds}s")
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         val canTalk = conversationState == ConversationState.READY ||
-                            conversationState == ConversationState.IDLE
+                            conversationState == ConversationState.IDLE ||
+                            conversationState == ConversationState.CONNECTING
                         val waiting = conversationState == ConversationState.WAITING_RESPONSE
                         val isTalking = conversationState == ConversationState.TALKING
                         val buttonLabel = when {
                             waiting -> "Waiting for reply..."
                             isTalking -> "Release to send"
+                            conversationState == ConversationState.CONNECTING -> "Starting session..."
                             else -> "Hold to talk"
                         }
                         Button(
@@ -122,6 +126,14 @@ internal fun BlinkyScreen(
                                 }
                         ) {
                             Text(text = buttonLabel)
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = { viewModel.endConversation() },
+                            enabled = conversationState != ConversationState.IDLE,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        ) {
+                            Text(text = "End Session")
                         }
 
                         Text(text = "gRPC Status: $grpcState")

@@ -83,6 +83,9 @@ class BlinkyViewModel @Inject constructor(
     val waitingResponseSeconds = repository.waitingResponseSeconds
         .stateIn(viewModelScope, SharingStarted.Lazily, 0L)
 
+    val conversationSessionReady = repository.conversationSessionReady
+        .stateIn(viewModelScope, SharingStarted.Lazily, false)
+
     init {
         // In this sample we want to connect to the device as soon as the view model is created.
         connect()

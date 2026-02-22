@@ -81,6 +81,11 @@ interface Blinky {
     val waitingResponseSeconds: StateFlow<Long>
 
     /**
+     * Session ready signal after server accepts first audio.
+     */
+    val conversationSessionReady: StateFlow<Boolean>
+
+    /**
      * Controls the LED state.
      *
      * @param state the new state of the LED.

@@ -69,6 +69,8 @@ private class BlinkyManagerImpl(
     override val conversationSessionId = _conversationSessionId.asStateFlow()
     private val _waitingResponseSeconds = MutableStateFlow(0L)
     override val waitingResponseSeconds = _waitingResponseSeconds.asStateFlow()
+    private val _conversationSessionReady = MutableStateFlow(false)
+    override val conversationSessionReady = _conversationSessionReady.asStateFlow()
 
     private var sessionId: String? = null
     private var sessionStartMs: Long = 0L
@@ -78,10 +80,22 @@ private class BlinkyManagerImpl(
     private var waitingTimeoutMs: Long = 30 * 1000L
     private var waitingJob: Job? = null
     private var sessionJob: Job? = null
+    private var keepaliveJob: Job? = null
     private var talkJob: Job? = null
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
     private var talkSeq: Long = 1L
+    private var pendingTalk: Boolean = false
+    private var sessionDelayJob: Job? = null
+    private var initialSessionDelayMs: Long = 8000L
+    private var playbackJob: Job? = null
+    private val playbackLock = Any()
+    private val playbackQueue: ArrayDeque<ByteArray> = ArrayDeque()
+    private var playbackQueuedBytes: Int = 0
+    @Volatile private var playbackDraining: Boolean = false
+    @Volatile private var lastAudioRxMs: Long = 0L
+    @Volatile private var playbackAllowed: Boolean = false
+    @Volatile private var playbackForceDrain: Boolean = false
 
     private var audioCurrSeq = -1
     private var audioCurrMask = 0
@@ -93,6 +107,14 @@ private class BlinkyManagerImpl(
     private val channels = 1
     private val bitsPerSample = 16
     private val useBleMic = true
+    private val playbackFrameBytes = (sampleRateHz / 50) * channels * (bitsPerSample / 8)
+    private var playbackStartFrames = 20  // ~400ms
+    private var playbackLowFrames = 10    // ~200ms
+    private val playbackMaxFrames = 1200  // ~24s cap
+    private val playbackMinStartFrames = 10
+    private val playbackMinLowFrames = 5
+    private val playbackMaxStartFrames = 40
+    private val playbackMaxLowFrames = 20
 
     override val state = stateAsFlow()
         .map {
@@ -250,49 +272,119 @@ private class BlinkyManagerImpl(
         if (_conversationState.value != ConversationState.IDLE) return
         sessionId = "session_${System.currentTimeMillis()}"
         _conversationSessionId.value = sessionId
+        _conversationSessionReady.value = false
+        pendingTalk = false
         sessionStartMs = System.currentTimeMillis()
         lastSpeechMs = sessionStartMs
         _conversationState.value = ConversationState.CONNECTING
+        playbackAllowed = false
+        playbackDraining = false
+        playbackForceDrain = false
         ensureAudioTrack()
         GrpcAudioClient.startSession(sessionId!!)
         sendPrimerFrame()
+        GrpcAudioClient.setAudioStartListener {
+            if (_conversationState.value != ConversationState.IDLE) {
+                _conversationState.value = ConversationState.WAITING_RESPONSE
+                startWaitingCountdown()
+            }
+            GrpcAudioClient.setSendPaused(true)
+            updateKeepalive()
+        }
+        GrpcAudioClient.setSessionStartListener {
+            _conversationSessionReady.value = true
+            sessionDelayJob?.cancel()
+            sessionDelayJob = null
+            if (pendingTalk) {
+                pendingTalk = false
+                _conversationState.value = ConversationState.TALKING
+            } else {
+                _conversationState.value = ConversationState.READY
+            }
+            updateKeepalive()
+        }
         GrpcAudioClient.setAudioOutputListener { pcm ->
-            playAudio(pcm)
+            if (_conversationState.value != ConversationState.IDLE &&
+                _conversationState.value != ConversationState.WAITING_RESPONSE) {
+                _conversationState.value = ConversationState.WAITING_RESPONSE
+                startWaitingCountdown()
+            }
+            enqueueAudio(pcm)
         }
         GrpcAudioClient.setAudioCompleteListener {
-            if (_conversationState.value == ConversationState.WAITING_RESPONSE) {
-                _conversationState.value = ConversationState.READY
-                _waitingResponseSeconds.value = 0L
+            if (_conversationState.value != ConversationState.IDLE) {
+                _conversationState.value = ConversationState.WAITING_RESPONSE
+                startWaitingCountdown()
             }
+            // Wait until playback buffer drains before allowing next talk
+            playbackAllowed = true
+            playbackDraining = true
+            playbackForceDrain = true
+            ensureAudioTrack()
+            startPlaybackLoop()
+            val now = System.currentTimeMillis()
+            val drained = synchronized(playbackLock) { playbackQueuedBytes == 0 }
+            if (drained && now - lastAudioRxMs > 200L) {
+                playbackDraining = false
+                playbackAllowed = false
+                playbackForceDrain = false
+                if (_conversationState.value == ConversationState.WAITING_RESPONSE) {
+                    _conversationState.value = ConversationState.READY
+                    _waitingResponseSeconds.value = 0L
+                    updateKeepalive()
+                }
+            }
+            GrpcAudioClient.setSendPaused(false)
+            updateKeepalive()
         }
         GrpcAudioClient.setErrorListener { msg ->
             Timber.e("gRPC error: %s", msg)
         }
+        GrpcAudioClient.setStreamErrorListener { msg ->
+            Timber.e("gRPC stream error: %s", msg)
+            scope.launch { handleStreamError() }
+        }
         startSessionWatchdog()
-        _conversationState.value = ConversationState.READY
+        startInitialSessionDelay()
     }
 
     override suspend fun startTalking() {
         val state = _conversationState.value
-        if (state != ConversationState.READY) return
         if (sessionId == null) {
             startConversation()
         }
-        _conversationState.value = ConversationState.TALKING
-        lastSpeechMs = System.currentTimeMillis()
+        if (playbackDraining || playbackQueuedBytes > 0) {
+            return
+        }
+        if (_conversationSessionReady.value) {
+            _conversationState.value = ConversationState.TALKING
+            lastSpeechMs = System.currentTimeMillis()
+            GrpcAudioClient.setSendPaused(false)
+        } else {
+            pendingTalk = true
+        }
+        updateKeepalive()
         if (!useBleMic) {
             startMicCapture()
         }
     }
 
     override suspend fun stopTalking() {
-        if (_conversationState.value != ConversationState.TALKING) return
+        if (_conversationState.value != ConversationState.TALKING) {
+            if (_conversationState.value == ConversationState.CONNECTING && pendingTalk) {
+                pendingTalk = false
+                endConversation()
+            }
+            return
+        }
         if (!useBleMic) {
             stopMicCapture()
         }
         lastSpeechMs = System.currentTimeMillis()
         _conversationState.value = ConversationState.WAITING_RESPONSE
+        GrpcAudioClient.setSendPaused(true)
         startWaitingCountdown()
+        updateKeepalive()
     }
 
     override suspend fun endConversation() {
@@ -306,12 +398,19 @@ private class BlinkyManagerImpl(
         val id = sessionId
         sessionId = null
         _conversationSessionId.value = null
+        _conversationSessionReady.value = false
+        pendingTalk = false
+        sessionDelayJob?.cancel()
+        sessionDelayJob = null
         _conversationState.value = ConversationState.IDLE
+        playbackAllowed = false
+        playbackDraining = false
+        playbackForceDrain = false
         if (id != null) {
             GrpcAudioClient.endConversation(id)
         }
-        GrpcAudioClient.close()
         releaseAudioTrack()
+        stopKeepalive()
     }
 
     private fun handleAudioPacket(bytes: ByteArray): Boolean {
@@ -465,6 +564,78 @@ private class BlinkyManagerImpl(
         }
     }
 
+    private fun updateKeepalive() {
+        if (_conversationState.value == ConversationState.READY && _conversationSessionReady.value) {
+            startKeepalive()
+        } else {
+            stopKeepalive()
+        }
+    }
+
+    private fun startKeepalive() {
+        if (keepaliveJob?.isActive == true) return
+        val frameSamples = (sampleRateHz / 50).coerceAtLeast(1) // 20ms
+        val frameBytes = frameSamples * channels * (bitsPerSample / 8)
+        val silent = ByteArray(frameBytes)
+        keepaliveJob = scope.launch {
+            var seq = 3_000_000L
+            while (true) {
+                delay(1000L)
+                if (_conversationState.value != ConversationState.READY || !_conversationSessionReady.value) {
+                    break
+                }
+                GrpcAudioClient.sendAudio(silent, seq++)
+            }
+        }
+    }
+
+    private fun stopKeepalive() {
+        keepaliveJob?.cancel()
+        keepaliveJob = null
+    }
+
+    private suspend fun handleStreamError() {
+        stopMicCapture()
+        sessionJob?.cancel()
+        sessionJob = null
+        waitingJob?.cancel()
+        waitingJob = null
+        _waitingResponseSeconds.value = 0L
+        sessionDelayJob?.cancel()
+        sessionDelayJob = null
+        pendingTalk = false
+        val id = sessionId
+        if (id != null) {
+            GrpcAudioClient.endConversation(id)
+        }
+        sessionId = null
+        _conversationSessionId.value = null
+        _conversationSessionReady.value = false
+        _conversationState.value = ConversationState.IDLE
+        playbackAllowed = false
+        playbackDraining = false
+        playbackForceDrain = false
+        stopKeepalive()
+        releaseAudioTrack()
+    }
+
+    private fun startInitialSessionDelay() {
+        sessionDelayJob?.cancel()
+        sessionDelayJob = scope.launch {
+            delay(initialSessionDelayMs)
+            if (_conversationState.value == ConversationState.CONNECTING && !_conversationSessionReady.value) {
+                _conversationSessionReady.value = true
+                if (pendingTalk) {
+                    pendingTalk = false
+                    _conversationState.value = ConversationState.TALKING
+                } else {
+                    _conversationState.value = ConversationState.READY
+                }
+                updateKeepalive()
+            }
+        }
+    }
+
     private fun startMicCapture() {
         if (talkJob?.isActive == true) return
         val minBuf = AudioRecord.getMinBufferSize(
@@ -515,19 +686,118 @@ private class BlinkyManagerImpl(
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .build()
             )
-            .setBufferSizeInBytes(minBuf)
+            .setBufferSizeInBytes(minBuf * 4)
             .build()
         audioTrack?.play()
+        startPlaybackLoop()
     }
 
-    private fun playAudio(pcm: ByteArray) {
-        val track = audioTrack ?: return
-        track.write(pcm, 0, pcm.size)
+    private fun enqueueAudio(pcm: ByteArray) {
+        if (pcm.isEmpty()) return
+        lastAudioRxMs = System.currentTimeMillis()
+        synchronized(playbackLock) {
+            playbackQueue.addLast(pcm)
+            playbackQueuedBytes += pcm.size
+            val maxBytes = playbackMaxFrames * playbackFrameBytes
+            while (playbackQueuedBytes > maxBytes && playbackQueue.isNotEmpty()) {
+                val drop = playbackQueue.removeFirst()
+                playbackQueuedBytes -= drop.size
+            }
+        }
+    }
+
+    private fun startPlaybackLoop() {
+        if (playbackJob?.isActive == true) return
+        playbackJob = scope.launch {
+            var lastUnderrun = 0
+            var lastCheckMs = System.currentTimeMillis()
+            var lastStableMs = lastCheckMs
+            while (true) {
+                val track = audioTrack ?: break
+                if (track.state != AudioTrack.STATE_INITIALIZED) {
+                    break
+                }
+                if (!playbackAllowed) {
+                    delay(10L)
+                    continue
+                }
+                var chunk: ByteArray? = null
+                var queued: Int
+                synchronized(playbackLock) {
+                    queued = playbackQueuedBytes
+                    val startBytes = playbackStartFrames * playbackFrameBytes
+                    val lowBytes = playbackLowFrames * playbackFrameBytes
+                    if (playbackForceDrain || queued >= startBytes || (queued > 0 && queued >= lowBytes)) {
+                        chunk = if (playbackQueue.isNotEmpty()) playbackQueue.removeFirst() else null
+                        if (chunk != null) {
+                            playbackQueuedBytes -= chunk!!.size
+                        }
+                    }
+                }
+                if (chunk == null) {
+                    delay(10L)
+                } else {
+                    try {
+                        if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                            track.play()
+                        }
+                        var offset = 0
+                        while (offset < chunk!!.size) {
+                            val wrote = track.write(chunk!!, offset, chunk!!.size - offset)
+                            if (wrote <= 0) break
+                            offset += wrote
+                        }
+                    } catch (t: Throwable) {
+                        Timber.e("AudioTrack write error: %s", t.message ?: "unknown")
+                        break
+                    }
+                }
+                if (playbackDraining) {
+                    val now = System.currentTimeMillis()
+                    val drained = synchronized(playbackLock) { playbackQueuedBytes == 0 }
+                    if (drained && now - lastAudioRxMs > 200L) {
+                        playbackDraining = false
+                        playbackAllowed = false
+                        playbackForceDrain = false
+                        if (_conversationState.value == ConversationState.WAITING_RESPONSE) {
+                            _conversationState.value = ConversationState.READY
+                            _waitingResponseSeconds.value = 0L
+                            updateKeepalive()
+                        }
+                    }
+                }
+                val now = System.currentTimeMillis()
+                if (now - lastCheckMs >= 1000L) {
+                    val underrun = try { track.underrunCount } catch (_: Throwable) { lastUnderrun }
+                    if (underrun > lastUnderrun) {
+                        playbackStartFrames = (playbackStartFrames + 5).coerceAtMost(playbackMaxStartFrames)
+                        playbackLowFrames = (playbackLowFrames + 5).coerceAtMost(playbackMaxLowFrames)
+                        lastStableMs = now
+                    } else if (now - lastStableMs >= 5000L) {
+                        playbackStartFrames = (playbackStartFrames - 1).coerceAtLeast(playbackMinStartFrames)
+                        playbackLowFrames = (playbackLowFrames - 1).coerceAtLeast(playbackMinLowFrames)
+                        lastStableMs = now
+                    }
+                    lastUnderrun = underrun
+                    lastCheckMs = now
+                }
+            }
+        }
     }
 
     private fun releaseAudioTrack() {
-        audioTrack?.stop()
-        audioTrack?.release()
+        playbackJob?.cancel()
+        playbackJob = null
+        synchronized(playbackLock) {
+            playbackQueue.clear()
+            playbackQueuedBytes = 0
+        }
+        try {
+            audioTrack?.stop()
+        } catch (_: Throwable) { }
+        try {
+            audioTrack?.release()
+        } catch (_: Throwable) { }
         audioTrack = null
     }
 

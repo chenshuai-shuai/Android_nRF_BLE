@@ -87,6 +87,9 @@ class BlinkyRepository @Inject constructor(
     override val waitingResponseSeconds: StateFlow<Long>
         get() = blinky.waitingResponseSeconds
 
+    override val conversationSessionReady: StateFlow<Boolean>
+        get() = blinky.conversationSessionReady
+
     override fun release() {
         Timber.uproot(tree)
         blinky.release()

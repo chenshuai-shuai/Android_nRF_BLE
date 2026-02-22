@@ -26,6 +26,7 @@ object GrpcAudioClient {
     private var channel: ManagedChannel? = null
     private var requestObserver: StreamObserver<TrainiProto.AudioChunk>? = null
     private var reconnectDelayMs = 1000L
+    private var reconnectJob: Job? = null
     private var heartbeatJob: Job? = null
     private var heartbeatSeq: Long = 1
     private var silenceJob: Job? = null
@@ -65,10 +66,12 @@ object GrpcAudioClient {
     private var audioOutputListener: ((ByteArray) -> Unit)? = null
     private var audioCompleteListener: (() -> Unit)? = null
     private var errorListener: ((String) -> Unit)? = null
+    private var streamErrorListener: ((String) -> Unit)? = null
     private var audioStartListener: (() -> Unit)? = null
     private var sessionStartListener: (() -> Unit)? = null
     private var decodeAudioOutputBase64: Boolean = true
     private var autoDetectBase64Output: Boolean = true
+    private var sendPaused: Boolean = false
 
     private val formatBuilder = TrainiProto.AudioFormat.newBuilder()
         .setSampleRate(sampleRate)
@@ -146,9 +149,19 @@ object GrpcAudioClient {
         errorListener = listener
     }
 
+    fun setStreamErrorListener(listener: ((String) -> Unit)?) {
+        streamErrorListener = listener
+    }
+    fun setSendPaused(paused: Boolean) {
+        sendPaused = paused
+        if (paused) {
+            drainSendQueue()
+        }
+    }
+
     fun startSession(sessionId: String) {
         currentSessionId = sessionId
-        close()
+        closeStream()
         start(host, port)
     }
 
@@ -191,9 +204,8 @@ object GrpcAudioClient {
     fun start(host: String = this.host, port: Int = this.port) {
         this.host = host
         this.port = port
-        if (channel != null) return
         startSender()
-        connect()
+        startStream()
     }
 
     fun setHeartbeatIntervalMs(intervalMs: Long) {
@@ -219,6 +231,8 @@ object GrpcAudioClient {
 
     fun close() {
         closing = true
+        reconnectJob?.cancel()
+        reconnectJob = null
         heartbeatJob?.cancel()
         heartbeatJob = null
         silenceJob?.cancel()
@@ -233,30 +247,25 @@ object GrpcAudioClient {
             Timber.w("gRPC onCompleted error: %s", t.message ?: "unknown")
         }
         requestObserver = null
-        channel?.shutdownNow()
-        channel = null
         GrpcStatusStore.setState("DISCONNECTED")
         streamReady = false
         pendingTestTone = testToneEnabled && !testToneSent
         watchdogEnabled = false
     }
 
-    private fun connect() {
+    private fun startStream() {
+        ensureChannel()
         closing = false
         GrpcStatusStore.setState("CONNECTING")
         GrpcStatusStore.setLastMessage("connecting $host:$port")
-        Timber.i("gRPC connecting to %s:%d", host, port)
-        channel = ManagedChannelBuilder.forAddress(host, port)
-            .usePlaintext()
-            .build()
-        startConnectivityLogging()
         val metadata = Metadata().apply {
             put(Metadata.Key.of("user-id", Metadata.ASCII_STRING_MARSHALLER), "demo_user")
             currentSessionId?.let {
                 put(Metadata.Key.of("session-id", Metadata.ASCII_STRING_MARSHALLER), it)
             }
         }
-        val stub = ConversationServiceGrpc.newStub(channel)
+        val ch = channel ?: return
+        val stub = ConversationServiceGrpc.newStub(ch)
             .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata))
         requestObserver = stub.streamConversation(object : StreamObserver<TrainiProto.ConversationEvent> {
             override fun onNext(value: TrainiProto.ConversationEvent) {
@@ -304,6 +313,7 @@ object GrpcAudioClient {
                 val msg = t.message ?: "unknown"
                 GrpcStatusStore.setLastMessage("error=$msg")
                 Timber.e("gRPC stream error: %s", msg)
+                streamErrorListener?.invoke(msg)
                 requestObserver = null
                 streamReady = false
                 pendingTestTone = testToneEnabled && !testToneSent
@@ -316,6 +326,7 @@ object GrpcAudioClient {
                 GrpcStatusStore.setState("DISCONNECTED")
                 GrpcStatusStore.setLastMessage("completed")
                 Timber.i("gRPC stream completed")
+                streamErrorListener?.invoke("completed")
                 requestObserver = null
                 streamReady = false
                 pendingTestTone = testToneEnabled && !testToneSent
@@ -340,10 +351,38 @@ object GrpcAudioClient {
         }
     }
 
+    private fun ensureChannel() {
+        val ch = channel
+        if (ch != null && (ch.isShutdown || ch.isTerminated)) {
+            channel = null
+        }
+        if (channel != null) return
+        Timber.i("gRPC connecting to %s:%d", host, port)
+        channel = ManagedChannelBuilder.forAddress(host, port)
+            .usePlaintext()
+            .build()
+        startConnectivityLogging()
+    }
+
+    private fun closeStream() {
+        try {
+            requestObserver?.onCompleted()
+        } catch (t: Throwable) {
+            Timber.w("gRPC onCompleted error: %s", t.message ?: "unknown")
+        }
+        requestObserver = null
+        streamReady = false
+        pendingTestTone = testToneEnabled && !testToneSent
+    }
+
     private fun startSender() {
         if (senderJob?.isActive == true) return
         senderJob = scope.launch {
             for (item in sendQueue) {
+                if (sendPaused) {
+                    GrpcStatusStore.incrementDropped()
+                    continue
+                }
                 val observer = requestObserver
                 if (observer == null || (!streamReady && !allowSendBeforeReady)) {
                     GrpcStatusStore.incrementDropped()
@@ -379,14 +418,20 @@ object GrpcAudioClient {
 
     private fun scheduleReconnect() {
         if (closing) return
-        if (reconnecting) return
-        reconnecting = true
-        scope.launch {
+        if (reconnectJob?.isActive == true) return
+        reconnectJob = scope.launch {
             delay(reconnectDelayMs)
             reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(10_000L)
-            close()
-            connect()
-            reconnecting = false
+            startStream()
+            reconnectDelayMs = 1000L
+            reconnectJob = null
+        }
+    }
+
+    private fun drainSendQueue() {
+        while (true) {
+            val res = sendQueue.tryReceive()
+            if (!res.isSuccess) break
         }
     }
 
