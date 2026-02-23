@@ -312,7 +312,9 @@ private class BlinkyManagerImpl(
         sessionId = "session_${System.currentTimeMillis()}"
         _conversationSessionId.value = sessionId
         _conversationSessionReady.value = false
-        pendingTalk = false
+        if (_conversationState.value == ConversationState.TALKING) {
+            pendingTalk = true
+        }
         sessionStartMs = System.currentTimeMillis()
         lastSpeechMs = sessionStartMs
         _conversationState.value = ConversationState.CONNECTING

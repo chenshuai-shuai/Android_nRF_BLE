@@ -36,6 +36,7 @@ object GrpcAudioClient {
     @Volatile private var reconnecting: Boolean = false
     @Volatile private var connectivityLogging: Boolean = false
     @Volatile private var closing: Boolean = false
+    @Volatile private var closingStream: Boolean = false
     private var connectivityListener: ((ConnectivityState) -> Unit)? = null
 
     private var host: String = "3.81.218.211"
@@ -316,6 +317,12 @@ object GrpcAudioClient {
             }
 
             override fun onError(t: Throwable) {
+                if (closingStream) {
+                    closingStream = false
+                    requestObserver = null
+                    streamReady = false
+                    return
+                }
                 GrpcStatusStore.setState("DISCONNECTED")
                 val msg = t.message ?: "unknown"
                 GrpcStatusStore.setLastMessage("error=$msg")
@@ -330,6 +337,12 @@ object GrpcAudioClient {
             }
 
             override fun onCompleted() {
+                if (closingStream) {
+                    closingStream = false
+                    requestObserver = null
+                    streamReady = false
+                    return
+                }
                 GrpcStatusStore.setState("DISCONNECTED")
                 GrpcStatusStore.setLastMessage("completed")
                 Timber.tag(TAG).i("gRPC stream completed")
@@ -373,6 +386,7 @@ object GrpcAudioClient {
 
     private fun closeStream() {
         try {
+            closingStream = true
             requestObserver?.onCompleted()
         } catch (t: Throwable) {
             Timber.tag(TAG).w("gRPC onCompleted error: %s", t.message ?: "unknown")
