@@ -22,6 +22,7 @@ import traini.ConversationServiceGrpc
 import traini.TrainiProto
 
 object GrpcAudioClient {
+    private const val TAG = "GrpcAudioClient"
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var channel: ManagedChannel? = null
     private var requestObserver: StreamObserver<TrainiProto.AudioChunk>? = null
@@ -35,6 +36,7 @@ object GrpcAudioClient {
     @Volatile private var reconnecting: Boolean = false
     @Volatile private var connectivityLogging: Boolean = false
     @Volatile private var closing: Boolean = false
+    private var connectivityListener: ((ConnectivityState) -> Unit)? = null
 
     private var host: String = "3.81.218.211"
     private var port: Int = 50051
@@ -220,12 +222,12 @@ object GrpcAudioClient {
     fun sendAudio(pcm: ByteArray, seq: Long) {
         if (!streamReady && !allowSendBeforeReady) {
             GrpcStatusStore.incrementDropped()
-            Timber.tag("GrpcAudioClient").w("Drop audio (not ready) seq=%d bytes=%d", seq, pcm.size)
+            Timber.tag(TAG).w("Drop audio (not ready) seq=%d bytes=%d", seq, pcm.size)
             return
         }
         if (sendQueue.trySend(PendingAudio(pcm, seq)).isFailure) {
             GrpcStatusStore.incrementDropped()
-            Timber.tag("GrpcAudioClient").w("Drop audio (queue full) seq=%d bytes=%d", seq, pcm.size)
+            Timber.tag(TAG).w("Drop audio (queue full) seq=%d bytes=%d", seq, pcm.size)
         }
     }
 
@@ -244,7 +246,7 @@ object GrpcAudioClient {
         try {
             requestObserver?.onCompleted()
         } catch (t: Throwable) {
-            Timber.w("gRPC onCompleted error: %s", t.message ?: "unknown")
+            Timber.tag(TAG).w("gRPC onCompleted error: %s", t.message ?: "unknown")
         }
         requestObserver = null
         GrpcStatusStore.setState("DISCONNECTED")
@@ -269,50 +271,55 @@ object GrpcAudioClient {
             .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata))
         requestObserver = stub.streamConversation(object : StreamObserver<TrainiProto.ConversationEvent> {
             override fun onNext(value: TrainiProto.ConversationEvent) {
-                GrpcStatusStore.setState("CONNECTED")
-                lastServerEventMs = System.currentTimeMillis()
-                if (!streamReady) {
-                    streamReady = true
-                    sessionStartListener?.invoke()
-                    if (pendingTestTone && !testToneSent) {
-                        scope.launch {
-                            delay(300)
-                            sendTestToneOnce()
+                try {
+                    GrpcStatusStore.setState("CONNECTED")
+                    lastServerEventMs = System.currentTimeMillis()
+                    if (!streamReady) {
+                        streamReady = true
+                        sessionStartListener?.invoke()
+                        if (pendingTestTone && !testToneSent) {
+                            scope.launch {
+                                delay(300)
+                                sendTestToneOnce()
+                            }
                         }
                     }
-                }
-                when (value.eventCase) {
-                    TrainiProto.ConversationEvent.EventCase.AUDIO_OUTPUT -> {
-                        val bytes = value.audioOutput.audioData.size()
-                        if (bytes > 0) {
-                            val msg = "audio bytes=$bytes seq=${value.audioOutput.sequenceNumber}"
-                            GrpcStatusStore.setLastMessage(msg)
-                            Timber.i("gRPC RX %s", msg)
-                            audioStartListener?.invoke()
-                            val pcm = decodeAudioData(value.audioOutput.audioData)
-                            audioOutputListener?.invoke(pcm)
+                    when (value.eventCase) {
+                        TrainiProto.ConversationEvent.EventCase.AUDIO_OUTPUT -> {
+                            val bytes = value.audioOutput.audioData.size()
+                            if (bytes > 0) {
+                                val msg = "audio bytes=$bytes seq=${value.audioOutput.sequenceNumber}"
+                                GrpcStatusStore.setLastMessage(msg)
+                Timber.tag(TAG).i("gRPC RX %s", msg)
+                audioStartListener?.invoke()
+                val pcm = decodeAudioData(value.audioOutput.audioData)
+                audioOutputListener?.invoke(pcm)
+                            }
                         }
-                    }
-                    TrainiProto.ConversationEvent.EventCase.AUDIO_COMPLETE -> {
-                        GrpcStatusStore.setLastMessage("audio complete")
-                        Timber.i("gRPC RX audio complete")
+                        TrainiProto.ConversationEvent.EventCase.AUDIO_COMPLETE -> {
+                            GrpcStatusStore.setLastMessage("audio complete")
+                        Timber.tag(TAG).i("gRPC RX audio complete")
                         audioCompleteListener?.invoke()
-                    }
-                    TrainiProto.ConversationEvent.EventCase.ERROR -> {
-                        val msg = "error=${value.error.code} ${value.error.message}"
-                        GrpcStatusStore.setLastMessage(msg)
-                        Timber.e("gRPC %s", msg)
+                        }
+                        TrainiProto.ConversationEvent.EventCase.ERROR -> {
+                            val msg = "error=${value.error.code} ${value.error.message}"
+                            GrpcStatusStore.setLastMessage(msg)
+                        Timber.tag(TAG).e("gRPC %s", msg)
                         errorListener?.invoke(msg)
+                        }
+                        else -> Unit
                     }
-                    else -> Unit
-                }
+                } catch (t: Throwable) {
+                Timber.tag(TAG).e(t, "gRPC onNext crash")
+                throw t
+            }
             }
 
             override fun onError(t: Throwable) {
                 GrpcStatusStore.setState("DISCONNECTED")
                 val msg = t.message ?: "unknown"
                 GrpcStatusStore.setLastMessage("error=$msg")
-                Timber.e("gRPC stream error: %s", msg)
+                Timber.tag(TAG).e("gRPC stream error: %s", msg)
                 streamErrorListener?.invoke(msg)
                 requestObserver = null
                 streamReady = false
@@ -325,7 +332,7 @@ object GrpcAudioClient {
             override fun onCompleted() {
                 GrpcStatusStore.setState("DISCONNECTED")
                 GrpcStatusStore.setLastMessage("completed")
-                Timber.i("gRPC stream completed")
+                Timber.tag(TAG).i("gRPC stream completed")
                 streamErrorListener?.invoke("completed")
                 requestObserver = null
                 streamReady = false
@@ -357,7 +364,7 @@ object GrpcAudioClient {
             channel = null
         }
         if (channel != null) return
-        Timber.i("gRPC connecting to %s:%d", host, port)
+        Timber.tag(TAG).i("gRPC connecting to %s:%d", host, port)
         channel = ManagedChannelBuilder.forAddress(host, port)
             .usePlaintext()
             .build()
@@ -368,7 +375,7 @@ object GrpcAudioClient {
         try {
             requestObserver?.onCompleted()
         } catch (t: Throwable) {
-            Timber.w("gRPC onCompleted error: %s", t.message ?: "unknown")
+            Timber.tag(TAG).w("gRPC onCompleted error: %s", t.message ?: "unknown")
         }
         requestObserver = null
         streamReady = false
@@ -386,7 +393,7 @@ object GrpcAudioClient {
                 val observer = requestObserver
                 if (observer == null || (!streamReady && !allowSendBeforeReady)) {
                     GrpcStatusStore.incrementDropped()
-                    Timber.tag("GrpcAudioClient").w("Drop audio (observer) seq=%d bytes=%d", item.seq, item.pcm.size)
+                    Timber.tag(TAG).w("Drop audio (observer) seq=%d bytes=%d", item.seq, item.pcm.size)
                     continue
                 }
                 val nowMs = System.currentTimeMillis()
@@ -405,10 +412,10 @@ object GrpcAudioClient {
                     lastClientSendMs = nowMs
                     sentCounter++
                     if (sentCounter % 50L == 0L) {
-                        Timber.i("gRPC TX packets=%d lastSeq=%d bytes=%d", sentCounter, item.seq, item.pcm.size)
+                        Timber.tag(TAG).i("gRPC TX packets=%d lastSeq=%d bytes=%d", sentCounter, item.seq, item.pcm.size)
                     }
                 } catch (t: Throwable) {
-                    Timber.e("gRPC send error: %s", t.message ?: "unknown")
+                    Timber.tag(TAG).e("gRPC send error: %s", t.message ?: "unknown")
                     requestObserver = null
                     scheduleReconnect()
                 }
@@ -440,8 +447,9 @@ object GrpcAudioClient {
         if (connectivityLogging) return
         connectivityLogging = true
         fun logState(state: ConnectivityState) {
-            Timber.i("gRPC channel state -> %s", state)
+            Timber.tag(TAG).i("gRPC channel state -> %s", state)
             GrpcStatusStore.setLastMessage("channel state=$state")
+            connectivityListener?.invoke(state)
         }
         fun watch() {
             val state = ch.getState(false)
@@ -453,6 +461,10 @@ object GrpcAudioClient {
         watch()
     }
 
+    fun setConnectivityListener(listener: ((ConnectivityState) -> Unit)?) {
+        connectivityListener = listener
+    }
+
     private fun startHeartbeat() {
         if (heartbeatJob?.isActive == true) return
         heartbeatJob = scope.launch {
@@ -460,7 +472,7 @@ object GrpcAudioClient {
                 delay(heartbeatIntervalMs)
                 val seq = heartbeatSeq++
                 sendAudio(byteArrayOf(0x00, 0x00), seq)
-                Timber.d("gRPC heartbeat seq=%d", seq)
+                Timber.tag(TAG).d("gRPC heartbeat seq=%d", seq)
             }
         }
     }
@@ -477,7 +489,7 @@ object GrpcAudioClient {
                 if (idleMs > serverEventTimeoutMs) {
                     streamReady = false
                     GrpcStatusStore.setLastMessage("server event timeout")
-                    Timber.w("gRPC server event timeout: %dms, pausing audio", idleMs)
+                    Timber.tag(TAG).w("gRPC server event timeout: %dms, pausing audio", idleMs)
                     scheduleReconnect()
                 }
             }
@@ -507,9 +519,9 @@ object GrpcAudioClient {
                     .build()
                 try {
                     observer.onNext(chunk)
-                    Timber.i("gRPC probe sent seq=%d bytes=%d", probeSeq - 1, pcm.size)
+                    Timber.tag(TAG).i("gRPC probe sent seq=%d bytes=%d", probeSeq - 1, pcm.size)
                 } catch (t: Throwable) {
-                    Timber.e("gRPC probe error: %s", t.message ?: "unknown")
+                    Timber.tag(TAG).e("gRPC probe error: %s", t.message ?: "unknown")
                 }
             }
         }
@@ -559,7 +571,7 @@ object GrpcAudioClient {
                 delay(20L)
                 val seq = silenceSeq++
                 sendAudio(silent, seq)
-                Timber.i("gRPC TX silence seq=%d bytes=%d", seq, silent.size)
+                Timber.tag(TAG).i("gRPC TX silence seq=%d bytes=%d", seq, silent.size)
             }
         }
     }
@@ -568,7 +580,7 @@ object GrpcAudioClient {
         if (testToneSent) return
         testToneSent = true
         if (channels != 1 || bitDepth != 16) {
-            Timber.w("Test tone expects 16-bit mono; current ch=%d depth=%d", channels, bitDepth)
+            Timber.tag(TAG).w("Test tone expects 16-bit mono; current ch=%d depth=%d", channels, bitDepth)
         }
         val frameSamples = (sampleRate / 50).coerceAtLeast(1) // 20ms frames
         val totalSamples = (sampleRate * durationMs / 1000L).toInt().coerceAtLeast(frameSamples)
@@ -595,6 +607,6 @@ object GrpcAudioClient {
         }
         val msg = "test tone sent ${durationMs}ms @ ${freqHz}Hz"
         GrpcStatusStore.setLastMessage(msg)
-        Timber.i("gRPC %s", msg)
+        Timber.tag(TAG).i("gRPC %s", msg)
     }
 }
