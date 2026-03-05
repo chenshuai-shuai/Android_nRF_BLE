@@ -19,6 +19,7 @@ dependencies {
     implementation(libs.timber)
     // Coroutines
     implementation(libs.kotlinx.coroutines.core)
+    implementation("com.google.android.gms:play-services-location:21.3.0")
 
     // gRPC / Protobuf (lite)
     implementation("io.grpc:grpc-okhttp:1.62.2")

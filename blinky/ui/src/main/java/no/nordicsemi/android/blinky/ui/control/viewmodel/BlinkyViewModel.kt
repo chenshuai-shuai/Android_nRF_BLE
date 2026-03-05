@@ -74,6 +74,12 @@ class BlinkyViewModel @Inject constructor(
     val grpcLastMessage = repository.grpcLastMessage
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
+    val gpsData = repository.gpsData
+        .stateIn(viewModelScope, SharingStarted.Lazily, null)
+
+    val gpsState = repository.gpsState
+        .stateIn(viewModelScope, SharingStarted.Lazily, no.nordicsemi.android.blinky.spec.GpsState.UNAVAILABLE)
+
     val conversationState = repository.conversationState
         .stateIn(viewModelScope, SharingStarted.Lazily, no.nordicsemi.android.blinky.spec.ConversationState.IDLE)
 
@@ -164,6 +170,10 @@ class BlinkyViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
             repository.endConversation()
         }
+    }
+
+    fun refreshGps() {
+        repository.refreshGps()
     }
 
     /**

@@ -1,17 +1,20 @@
 package no.nordicsemi.android.blinky.ui.control.view
 
+import android.Manifest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -66,17 +69,47 @@ internal fun BlinkyScreen(
                     }
                 }
                 Blinky.State.READY -> {
+                    val requestLocationPermissions = rememberLauncherForActivityResult(
+                        contract = ActivityResultContracts.RequestMultiplePermissions()
+                    ) { _ ->
+                        viewModel.refreshGps()
+                    }
+                    var gpsPermissionAsked by remember { mutableStateOf(false) }
                     val rxMessages by viewModel.rxMessages.collectAsStateWithLifecycle()
                     val audioStats by viewModel.audioStats.collectAsStateWithLifecycle()
                     val recording by viewModel.recording.collectAsStateWithLifecycle()
                     val lastSavedPath by viewModel.lastSavedPath.collectAsStateWithLifecycle()
                     val grpcState by viewModel.grpcState.collectAsStateWithLifecycle()
                     val grpcLastMessage by viewModel.grpcLastMessage.collectAsStateWithLifecycle()
+                    val gpsData by viewModel.gpsData.collectAsStateWithLifecycle()
+                    val gpsState by viewModel.gpsState.collectAsStateWithLifecycle()
                     val conversationState by viewModel.conversationState.collectAsStateWithLifecycle()
                     val sessionId by viewModel.conversationSessionId.collectAsStateWithLifecycle()
                     val waitingSeconds by viewModel.waitingResponseSeconds.collectAsStateWithLifecycle()
                     val sessionReady by viewModel.conversationSessionReady.collectAsStateWithLifecycle()
-                    var message by remember { mutableStateOf("") }
+                    val ppgMessages = rxMessages.filter { it.startsWith("PPG ") }
+                    val imuMessages = rxMessages.filter { it.startsWith("IMU ") }
+                    val gpsMessages = rxMessages.filter { it.startsWith("GPS ") }
+                    val lastPpg = ppgMessages.lastOrNull()
+                    val lastImu = imuMessages.lastOrNull()
+                    val lastGps = gpsMessages.lastOrNull()
+                    val sensorMessages = rxMessages.filter {
+                        it.startsWith("PPG ") || it.startsWith("IMU ") || it.startsWith("GPS ")
+                    }
+
+                    LaunchedEffect(gpsState) {
+                        if (gpsState == no.nordicsemi.android.blinky.spec.GpsState.PERMISSION_DENIED &&
+                            !gpsPermissionAsked
+                        ) {
+                            gpsPermissionAsked = true
+                            requestLocationPermissions.launch(
+                                arrayOf(
+                                    Manifest.permission.ACCESS_FINE_LOCATION,
+                                    Manifest.permission.ACCESS_COARSE_LOCATION,
+                                )
+                            )
+                        }
+                    }
 
                     Column(
                         modifier = Modifier
@@ -156,33 +189,55 @@ internal fun BlinkyScreen(
                             enabled = recording
                         ) { Text(text = "Stop & Save") }
                         Spacer(modifier = Modifier.height(12.dp))
-                        Text(text = "NRF Messages")
-                        if (rxMessages.isEmpty()) {
+                        Text(text = "PPG Data")
+                        Text(text = lastPpg ?: "(no ppg data)")
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(text = "IMU Data")
+                        Text(text = lastImu ?: "(no imu data)")
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(text = "GPS Data")
+                        when (gpsState) {
+                            no.nordicsemi.android.blinky.spec.GpsState.READY -> {
+                                if (gpsData != null) {
+                                    val g = gpsData!!
+                                    Text(text = "lat=${"%.6f".format(g.lat)} lon=${"%.6f".format(g.lon)}")
+                                    Text(
+                                        text = "acc=${"%.1f".format(g.accuracyM ?: -1f)}m " +
+                                            "spd=${"%.2f".format(g.speedMps ?: 0f)}m/s " +
+                                            "alt=${"%.1f".format(g.altM ?: 0.0)}m"
+                                    )
+                                } else {
+                                    Text(text = lastGps ?: "(gps ready, no sample)")
+                                }
+                            }
+                            no.nordicsemi.android.blinky.spec.GpsState.PERMISSION_DENIED -> {
+                                Text(text = "permission denied (please enable Location permission in system settings)")
+                            }
+                            no.nordicsemi.android.blinky.spec.GpsState.LOCATION_OFF -> {
+                                Text(text = "location is off")
+                                Button(
+                                    onClick = { viewModel.refreshGps() },
+                                    modifier = Modifier.padding(top = 6.dp)
+                                ) {
+                                    Text(text = "Retry GPS")
+                                }
+                            }
+                            no.nordicsemi.android.blinky.spec.GpsState.SEARCHING -> {
+                                Text(text = "searching...")
+                            }
+                            no.nordicsemi.android.blinky.spec.GpsState.UNAVAILABLE -> {
+                                Text(text = "unavailable")
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(text = "Sensor Messages")
+                        if (sensorMessages.isEmpty()) {
                             Text(text = "(no messages)")
                         } else {
-                            rxMessages.takeLast(6).forEach { msg ->
+                            sensorMessages.takeLast(8).forEach { msg ->
                                 Text(text = msg)
                             }
                         }
-                    }
-
-                    TextField(
-                        value = message,
-                        onValueChange = { message = it },
-                        label = { Text(text = "Send to device") },
-                        modifier = Modifier
-                            .widthIn(max = 460.dp)
-                            .padding(horizontal = 16.dp)
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Button(
-                        onClick = {
-                            viewModel.sendMessage(message)
-                            message = ""
-                        },
-                        modifier = Modifier.padding(bottom = 16.dp)
-                    ) {
-                        Text(text = "Send")
                     }
                 }
                 Blinky.State.NOT_AVAILABLE -> {

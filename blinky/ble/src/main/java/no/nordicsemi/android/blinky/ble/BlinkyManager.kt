@@ -4,11 +4,24 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
 import android.content.Context
+import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.os.Looper
 import android.util.Log
+import androidx.core.content.ContextCompat
+import com.google.android.gms.tasks.CancellationTokenSource
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
@@ -25,6 +38,8 @@ import no.nordicsemi.android.blinky.spec.Blinky
 import no.nordicsemi.android.blinky.spec.AudioStats
 import no.nordicsemi.android.blinky.spec.BlinkySpec
 import no.nordicsemi.android.blinky.spec.ConversationState
+import no.nordicsemi.android.blinky.spec.GpsData
+import no.nordicsemi.android.blinky.spec.GpsState
 import no.nordicsemi.android.blinky.spec.GrpcStatusStore
 import timber.log.Timber
 
@@ -72,6 +87,10 @@ private class BlinkyManagerImpl(
     override val waitingResponseSeconds = _waitingResponseSeconds.asStateFlow()
     private val _conversationSessionReady = MutableStateFlow(false)
     override val conversationSessionReady = _conversationSessionReady.asStateFlow()
+    private val _gpsData = MutableStateFlow<GpsData?>(null)
+    override val gpsData = _gpsData.asStateFlow()
+    private val _gpsState = MutableStateFlow(GpsState.UNAVAILABLE)
+    override val gpsState = _gpsState.asStateFlow()
 
     private var sessionId: String? = null
     private var sessionStartMs: Long = 0L
@@ -130,6 +149,27 @@ private class BlinkyManagerImpl(
     private val playbackMinLowFrames = 5
     private val playbackMaxStartFrames = 40
     private val playbackMaxLowFrames = 20
+    private var lastPpgMsgMs: Long = 0L
+    private var lastImuMsgMs: Long = 0L
+    private var lastGpsMsgMs: Long = 0L
+    private val fusedLocationClient: FusedLocationProviderClient by lazy {
+        LocationServices.getFusedLocationProviderClient(context)
+    }
+    private var locationCallback: LocationCallback? = null
+    private var gpsCurrentToken: CancellationTokenSource? = null
+    private var platformLocationListener: LocationListener? = null
+
+    private companion object {
+        private const val UPLINK_MAGIC0 = 0xC3
+        private const val UPLINK_MAGIC1 = 0x5C
+        private const val UPLINK_HDR_LEN = 14
+        private const val UPLINK_VER = 1
+        private const val AUDIO_CODEC_PCM16_LE = 1
+        private const val AUDIO_CODEC_IMA_ADPCM_8K = 2
+        private const val AUDIO_CODEC_HDR_LEN = 8
+        private const val APP_DATA_PART_PPG = 3
+        private const val APP_DATA_PART_IMU = 4
+    }
 
     override val state = stateAsFlow()
         .map {
@@ -149,6 +189,9 @@ private class BlinkyManagerImpl(
             override fun onMessageReceived(device: BluetoothDevice, data: Data) {
                 val bytes = data.value
                 if (bytes != null && bytes.size >= 8 && handleAudioPacket(bytes)) {
+                    return
+                }
+                if (bytes != null && bytes.size >= UPLINK_HDR_LEN && handleUplinkPacket(bytes)) {
                     return
                 }
 
@@ -199,6 +242,7 @@ private class BlinkyManagerImpl(
         sessionJob = null
         waitingJob?.cancel()
         waitingJob = null
+        stopGpsUpdates()
         if (!useBleMic) {
             stopMicCapture()
         }
@@ -273,6 +317,7 @@ private class BlinkyManagerImpl(
 
         // Align gRPC audio format with nRF mic settings (16kHz, mono, 16-bit).
         GrpcAudioClient.configure(sampleRateHz, channels, bitsPerSample)
+        startGpsUpdates()
 
         if (downlinkTestEnabled) {
             startDownlinkTest()
@@ -284,6 +329,185 @@ private class BlinkyManagerImpl(
         buttonCharacteristic = null
         downlinkTestJob?.cancel()
         downlinkTestJob = null
+        stopGpsUpdates()
+    }
+
+    private fun hasLocationPermission(): Boolean {
+        val fine = ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        val coarse = ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        return fine || coarse
+    }
+
+    private fun isLocationEnabled(): Boolean {
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return false
+        return try {
+            lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun startGpsUpdates() {
+        try {
+            val pkgInfo = context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_PERMISSIONS)
+            val reqPerms = pkgInfo.requestedPermissions?.joinToString() ?: "(none)"
+            Timber.i("GPS perms in manifest for %s: %s", context.packageName, reqPerms)
+            appendRxMessage("GPS_DIAG manifest=$reqPerms")
+        } catch (t: Throwable) {
+            Timber.w("GPS perm inspect failed: %s", t.message ?: "unknown")
+            appendRxMessage("GPS_DIAG manifest_read_failed=${t.message ?: "unknown"}")
+        }
+
+        val fineGranted = ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        val coarseGranted = ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        Timber.i("GPS runtime perm status fine=%s coarse=%s pkg=%s", fineGranted, coarseGranted, context.packageName)
+        appendRxMessage("GPS_DIAG runtime fine=$fineGranted coarse=$coarseGranted pkg=${context.packageName}")
+
+        if (!hasLocationPermission()) {
+            _gpsState.value = GpsState.PERMISSION_DENIED
+            return
+        }
+        if (!isLocationEnabled()) {
+            _gpsState.value = GpsState.LOCATION_OFF
+            return
+        }
+        if (locationCallback != null) {
+            return
+        }
+
+        _gpsState.value = GpsState.SEARCHING
+
+        // 1) Try cached fused location immediately.
+        try {
+            fusedLocationClient.lastLocation
+                .addOnSuccessListener { loc ->
+                    if (loc != null) {
+                        publishGps(loc)
+                    }
+                }
+        } catch (_: Throwable) {
+        }
+
+        // 2) Force one-shot high-accuracy fix (helps first fix on some devices).
+        try {
+            val token = CancellationTokenSource()
+            gpsCurrentToken = token
+            fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, token.token)
+                .addOnSuccessListener { loc ->
+                    if (loc != null) {
+                        publishGps(loc)
+                    }
+                }
+        } catch (_: Throwable) {
+        }
+
+        val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
+            .setMinUpdateIntervalMillis(500L)
+            .setMaxUpdateDelayMillis(1500L)
+            .build()
+
+        val cb = object : LocationCallback() {
+            override fun onLocationResult(result: LocationResult) {
+                val loc = result.lastLocation ?: return
+                publishGps(loc)
+            }
+        }
+
+        locationCallback = cb
+        try {
+            fusedLocationClient.requestLocationUpdates(req, cb, Looper.getMainLooper())
+        } catch (_: SecurityException) {
+            _gpsState.value = GpsState.PERMISSION_DENIED
+            locationCallback = null
+        } catch (t: Throwable) {
+            Timber.w("GPS start failed: %s", t.message ?: "unknown")
+            _gpsState.value = GpsState.UNAVAILABLE
+            locationCallback = null
+        }
+
+        // 3) Fallback: platform LocationManager updates (GNSS/network direct).
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        if (lm != null) {
+            val listener = LocationListener { loc ->
+                publishGps(loc)
+            }
+            platformLocationListener = listener
+            try {
+                lm.requestLocationUpdates(
+                    LocationManager.GPS_PROVIDER,
+                    1000L,
+                    0f,
+                    listener,
+                    Looper.getMainLooper()
+                )
+            } catch (_: Throwable) {
+            }
+            try {
+                lm.requestLocationUpdates(
+                    LocationManager.NETWORK_PROVIDER,
+                    1000L,
+                    0f,
+                    listener,
+                    Looper.getMainLooper()
+                )
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun stopGpsUpdates() {
+        val cb = locationCallback ?: return
+        try {
+            fusedLocationClient.removeLocationUpdates(cb)
+        } catch (_: Throwable) {
+        }
+        locationCallback = null
+        try {
+            gpsCurrentToken?.cancel()
+        } catch (_: Throwable) {
+        }
+        gpsCurrentToken = null
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        val listener = platformLocationListener
+        if (lm != null && listener != null) {
+            try {
+                lm.removeUpdates(listener)
+            } catch (_: Throwable) {
+            }
+        }
+        platformLocationListener = null
+    }
+
+    private fun publishGps(loc: Location) {
+        val gps = GpsData(
+            lat = loc.latitude,
+            lon = loc.longitude,
+            altM = if (loc.hasAltitude()) loc.altitude else null,
+            speedMps = if (loc.hasSpeed()) loc.speed else null,
+            bearingDeg = if (loc.hasBearing()) loc.bearing else null,
+            accuracyM = if (loc.hasAccuracy()) loc.accuracy else null,
+            provider = loc.provider,
+            timestampMs = loc.time,
+        )
+        _gpsData.value = gps
+        _gpsState.value = GpsState.READY
+
+        val now = System.currentTimeMillis()
+        if (now - lastGpsMsgMs >= 2000L) {
+            appendRxMessage(
+                "GPS lat=%.6f lon=%.6f acc=%.1fm".format(
+                    gps.lat,
+                    gps.lon,
+                    gps.accuracyM ?: -1f,
+                )
+            )
+            lastGpsMsgMs = now
+        }
     }
 
     override suspend fun sendMessage(text: String) {
@@ -294,6 +518,11 @@ private class BlinkyManagerImpl(
             data,
             BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         ).suspend()
+    }
+
+    override fun refreshGps() {
+        stopGpsUpdates()
+        startGpsUpdates()
     }
 
     override suspend fun startRecording() {
@@ -421,6 +650,7 @@ private class BlinkyManagerImpl(
 
     override suspend fun startTalking() {
         if (downlinkTestEnabled) return
+        requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH).enqueue()
         val state = _conversationState.value
         if (sessionId == null) {
             startConversation()
@@ -547,15 +777,21 @@ private class BlinkyManagerImpl(
                 if (frameBytes.isNotEmpty()) {
                     audioLastCompleteSeq = seq
                     val sendSeq = seq.toLong()
-                    val payload = if (nrfSampleRateHz == sampleRateHz) {
-                        frameBytes
-                    } else {
-                        resample16kTo24k(frameBytes)
-                    }
-                    scope.launch {
-                        if (_conversationState.value == ConversationState.TALKING) {
-                            GrpcAudioClient.sendAudio(payload, sendSeq)
+                    val decoded = decodeNrfAudioFrame(frameBytes)
+                    if (decoded != null) {
+                        val payload = when (decoded.second) {
+                            sampleRateHz -> decoded.first
+                            8000 -> resample8kTo24k(decoded.first)
+                            16000 -> resample16kTo24k(decoded.first)
+                            else -> resample16kTo24k(decoded.first)
                         }
+                        scope.launch {
+                            if (_conversationState.value == ConversationState.TALKING) {
+                                GrpcAudioClient.sendAudio(payload, sendSeq)
+                            }
+                        }
+                    } else {
+                        dropped++
                     }
                 }
                 audioCurrSeq = -1
@@ -574,6 +810,164 @@ private class BlinkyManagerImpl(
         )
         _audioStats.value = stats
         return true
+    }
+
+    private fun decodeNrfAudioFrame(frame: ByteArray): Pair<ByteArray, Int>? {
+        if (frame.isEmpty()) return null
+        val codec = frame[0].toInt() and 0xFF
+        if (codec == AUDIO_CODEC_PCM16_LE) {
+            if (frame.size <= 1) return null
+            return Pair(frame.copyOfRange(1, frame.size), nrfSampleRateHz)
+        }
+        if (codec != AUDIO_CODEC_IMA_ADPCM_8K || frame.size < AUDIO_CODEC_HDR_LEN + 1) {
+            return null
+        }
+
+        val sampleRateKHz = frame[1].toInt() and 0xFF
+        val sampleRate = sampleRateKHz * 1000
+        val sampleCount = frame[7].toInt() and 0xFF
+        if (sampleCount < 2) return null
+
+        val nibbleCount = sampleCount - 1
+        val needBytes = (nibbleCount + 1) / 2
+        if (frame.size < AUDIO_CODEC_HDR_LEN + needBytes) {
+            return null
+        }
+
+        val stepTable = intArrayOf(
+            7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+            19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+            50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+            130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+            337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+            876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+            2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+            5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+            15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+        )
+        val indexTable = intArrayOf(
+            -1, -1, -1, -1, 2, 4, 6, 8,
+            -1, -1, -1, -1, 2, 4, 6, 8
+        )
+
+        var predictor = leI16(frame, 4)
+        var index = (frame[6].toInt() and 0xFF).coerceIn(0, 88)
+        val out = ByteArray(sampleCount * 2)
+        out[0] = (predictor and 0xFF).toByte()
+        out[1] = ((predictor shr 8) and 0xFF).toByte()
+
+        var outSample = 1
+        var inOff = AUDIO_CODEC_HDR_LEN
+        var lowNibble = true
+        var packed = 0
+        while (outSample < sampleCount) {
+            if (lowNibble) {
+                packed = frame[inOff].toInt() and 0xFF
+                inOff++
+            }
+            val nibble = if (lowNibble) (packed and 0x0F) else ((packed shr 4) and 0x0F)
+            lowNibble = !lowNibble
+
+            val step = stepTable[index]
+            var diff = step shr 3
+            if ((nibble and 0x04) != 0) diff += step
+            if ((nibble and 0x02) != 0) diff += step shr 1
+            if ((nibble and 0x01) != 0) diff += step shr 2
+            predictor = if ((nibble and 0x08) != 0) predictor - diff else predictor + diff
+            predictor = predictor.coerceIn(-32768, 32767)
+            index = (index + indexTable[nibble]).coerceIn(0, 88)
+
+            val o = outSample * 2
+            out[o] = (predictor and 0xFF).toByte()
+            out[o + 1] = ((predictor shr 8) and 0xFF).toByte()
+            outSample++
+        }
+        return Pair(out, sampleRate)
+    }
+
+    private fun u8(bytes: ByteArray, off: Int): Int {
+        return bytes[off].toInt() and 0xFF
+    }
+
+    private fun le16(bytes: ByteArray, off: Int): Int {
+        return u8(bytes, off) or (u8(bytes, off + 1) shl 8)
+    }
+
+    private fun le32(bytes: ByteArray, off: Int): Long {
+        return (u8(bytes, off).toLong()) or
+            (u8(bytes, off + 1).toLong() shl 8) or
+            (u8(bytes, off + 2).toLong() shl 16) or
+            (u8(bytes, off + 3).toLong() shl 24)
+    }
+
+    private fun leI16(bytes: ByteArray, off: Int): Int {
+        val v = le16(bytes, off)
+        return if ((v and 0x8000) != 0) v - 0x10000 else v
+    }
+
+    private fun imuActionName(action: Int): String {
+        return when (action) {
+            1 -> "still"
+            2 -> "light_move"
+            3 -> "walk_like"
+            4 -> "run_like"
+            5 -> "vigorous_move"
+            else -> "unknown"
+        }
+    }
+
+    private fun appendRxMessage(msg: String) {
+        val updated = _rxMessages.value + msg
+        _rxMessages.value = updated.takeLast(40)
+    }
+
+    private fun handleUplinkPacket(bytes: ByteArray): Boolean {
+        if (u8(bytes, 0) != UPLINK_MAGIC0 || u8(bytes, 1) != UPLINK_MAGIC1) {
+            return false
+        }
+        val ver = u8(bytes, 2)
+        if (ver != UPLINK_VER) {
+            return true
+        }
+        val part = u8(bytes, 3)
+        val payloadLen = le16(bytes, 4)
+        if (payloadLen < 0 || (UPLINK_HDR_LEN + payloadLen) > bytes.size) {
+            return true
+        }
+        val payloadOff = UPLINK_HDR_LEN
+
+        when (part) {
+            APP_DATA_PART_PPG -> {
+                if (payloadLen >= 14) {
+                    val hr = leI16(bytes, payloadOff + 2)
+                    val conf = leI16(bytes, payloadOff + 4)
+                    val snr = leI16(bytes, payloadOff + 6)
+                    val frameId = le32(bytes, payloadOff + 8)
+                    val now = System.currentTimeMillis()
+                    if (now - lastPpgMsgMs >= 1000L) {
+                        lastPpgMsgMs = now
+                        appendRxMessage("PPG hr=${hr} conf=${conf} snr=${snr} frame=${frameId}")
+                    }
+                }
+                return true
+            }
+            APP_DATA_PART_IMU -> {
+                if (payloadLen >= 10) {
+                    val seq = le16(bytes, payloadOff + 2)
+                    val action = u8(bytes, payloadOff + 4)
+                    val conf = u8(bytes, payloadOff + 5)
+                    val now = System.currentTimeMillis()
+                    if (now - lastImuMsgMs >= 1000L) {
+                        lastImuMsgMs = now
+                        appendRxMessage("IMU seq=${seq} action=${imuActionName(action)} conf=${conf}")
+                    }
+                }
+                return true
+            }
+            else -> {
+                return true
+            }
+        }
     }
 
     private fun sendPrimerFrame() {
@@ -610,6 +1004,39 @@ private class BlinkyManagerImpl(
         val last = getSample(samples - 1).toShort()
         out[outIdx++] = (last.toInt() and 0xFF).toByte()
         out[outIdx++] = ((last.toInt() shr 8) and 0xFF).toByte()
+        return if (outIdx == out.size) out else out.copyOf(outIdx)
+    }
+
+    private fun resample8kTo24k(pcm8: ByteArray): ByteArray {
+        if (pcm8.size < 2) return pcm8
+        val inSamples = pcm8.size / 2
+        if (inSamples < 2) return pcm8
+        val outSamples = inSamples * 3
+        val out = ByteArray(outSamples * 2)
+        var outIdx = 0
+        fun getSample(idx: Int): Int {
+            val lo = pcm8[idx * 2].toInt() and 0xFF
+            val hi = pcm8[idx * 2 + 1].toInt()
+            return (hi shl 8) or lo
+        }
+        for (i in 0 until (inSamples - 1)) {
+            val s0 = getSample(i).toShort().toInt()
+            val s1 = getSample(i + 1).toShort().toInt()
+            val m1 = ((2 * s0 + s1) / 3).toShort().toInt()
+            val m2 = ((s0 + 2 * s1) / 3).toShort().toInt()
+            val vals = intArrayOf(s0, m1, m2)
+            for (v in vals) {
+                out[outIdx++] = (v and 0xFF).toByte()
+                out[outIdx++] = ((v shr 8) and 0xFF).toByte()
+            }
+        }
+        val last = getSample(inSamples - 1).toShort().toInt()
+        out[outIdx++] = (last and 0xFF).toByte()
+        out[outIdx++] = ((last shr 8) and 0xFF).toByte()
+        out[outIdx++] = (last and 0xFF).toByte()
+        out[outIdx++] = ((last shr 8) and 0xFF).toByte()
+        out[outIdx++] = (last and 0xFF).toByte()
+        out[outIdx++] = ((last shr 8) and 0xFF).toByte()
         return if (outIdx == out.size) out else out.copyOf(outIdx)
     }
 

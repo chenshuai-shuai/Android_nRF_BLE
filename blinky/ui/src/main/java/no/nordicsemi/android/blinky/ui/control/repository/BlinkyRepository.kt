@@ -78,6 +78,12 @@ class BlinkyRepository @Inject constructor(
     override val grpcLastMessage: StateFlow<String?>
         get() = blinky.grpcLastMessage
 
+    override val gpsData: StateFlow<no.nordicsemi.android.blinky.spec.GpsData?>
+        get() = blinky.gpsData
+
+    override val gpsState: StateFlow<no.nordicsemi.android.blinky.spec.GpsState>
+        get() = blinky.gpsState
+
     override val conversationState: StateFlow<no.nordicsemi.android.blinky.spec.ConversationState>
         get() = blinky.conversationState
 

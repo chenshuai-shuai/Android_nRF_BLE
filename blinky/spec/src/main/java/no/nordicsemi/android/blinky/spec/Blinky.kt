@@ -66,6 +66,21 @@ interface Blinky {
     val grpcLastMessage: StateFlow<String?>
 
     /**
+     * Latest phone GPS sample.
+     */
+    val gpsData: StateFlow<GpsData?>
+
+    /**
+     * Phone GPS state.
+     */
+    val gpsState: StateFlow<GpsState>
+
+    /**
+     * Re-check GPS permission/settings and restart location updates if possible.
+     */
+    fun refreshGps()
+
+    /**
      * Conversation state for phone microphone gRPC sessions.
      */
     val conversationState: StateFlow<ConversationState>
