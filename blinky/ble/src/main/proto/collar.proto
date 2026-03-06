@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package collar;
+
+option java_package = "collar";
+option java_outer_classname = "CollarProto";
+
+service CollarDataService {
+  rpc StreamSensorData(stream SensorDataRequest) returns (StreamAck);
+}
+
+message SensorDataRequest {
+  string device_id = 1;
+  string timestamp = 2;
+  int32 heart_rate = 3;
+  int32 hrv = 4;
+  GpsCoordinates gps = 5;
+}
+
+message GpsCoordinates {
+  double lat = 1;
+  double lon = 2;
+}
+
+message StreamAck {
+  bool success = 1;
+  string message = 2;
+  int32 packets_processed = 3;
+}
+

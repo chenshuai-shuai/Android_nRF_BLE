@@ -140,7 +140,7 @@ private class BlinkyManagerImpl(
     private val channels = 1
     private val bitsPerSample = 16
     private val useBleMic = true
-    private val useNrfSpeaker = true
+    private val useNrfSpeaker = false
     private val playbackFrameBytes = (sampleRateHz / 50) * channels * (bitsPerSample / 8)
     private var playbackStartFrames = 20  // ~400ms
     private var playbackLowFrames = 10    // ~200ms
@@ -152,6 +152,7 @@ private class BlinkyManagerImpl(
     private var lastPpgMsgMs: Long = 0L
     private var lastImuMsgMs: Long = 0L
     private var lastGpsMsgMs: Long = 0L
+    private var lastSensorGrpcLogMs: Long = 0L
     private val fusedLocationClient: FusedLocationProviderClient by lazy {
         LocationServices.getFusedLocationProviderClient(context)
     }
@@ -242,6 +243,7 @@ private class BlinkyManagerImpl(
         sessionJob = null
         waitingJob?.cancel()
         waitingJob = null
+        GrpcSensorClient.stop()
         stopGpsUpdates()
         if (!useBleMic) {
             stopMicCapture()
@@ -317,6 +319,14 @@ private class BlinkyManagerImpl(
 
         // Align gRPC audio format with nRF mic settings (16kHz, mono, 16-bit).
         GrpcAudioClient.configure(sampleRateHz, channels, bitsPerSample)
+        Timber.i("Audio downlink mode: APP_LOCAL_PLAYBACK (NRF speaker bypassed)")
+        GrpcSensorClient.configure(
+            host = "traini-inference-nlb-1e17132c99147402.elb.us-east-1.amazonaws.com",
+            port = 50051,
+            deviceId = device.address ?: "nrf-collar-unknown",
+            intervalMs = 1000L
+        )
+        GrpcSensorClient.start()
         startGpsUpdates()
 
         if (downlinkTestEnabled) {
@@ -329,6 +339,7 @@ private class BlinkyManagerImpl(
         buttonCharacteristic = null
         downlinkTestJob?.cancel()
         downlinkTestJob = null
+        GrpcSensorClient.stop()
         stopGpsUpdates()
     }
 
@@ -496,6 +507,7 @@ private class BlinkyManagerImpl(
         )
         _gpsData.value = gps
         _gpsState.value = GpsState.READY
+        GrpcSensorClient.updateGps(gps.lat, gps.lon)
 
         val now = System.currentTimeMillis()
         if (now - lastGpsMsgMs >= 2000L) {
@@ -507,6 +519,10 @@ private class BlinkyManagerImpl(
                 )
             )
             lastGpsMsgMs = now
+        }
+        if (now - lastSensorGrpcLogMs >= 5000L) {
+            appendRxMessage("SENSOR_GRPC gps forwarded")
+            lastSensorGrpcLogMs = now
         }
     }
 
@@ -943,10 +959,15 @@ private class BlinkyManagerImpl(
                     val conf = leI16(bytes, payloadOff + 4)
                     val snr = leI16(bytes, payloadOff + 6)
                     val frameId = le32(bytes, payloadOff + 8)
+                    val hrv = if (payloadLen >= 18) leI16(bytes, payloadOff + 16) else 0
+                    val hrvConf = if (payloadLen >= 20) leI16(bytes, payloadOff + 18) else 0
                     val now = System.currentTimeMillis()
+                    if (hr in 20..260) {
+                        GrpcSensorClient.updatePpg(hr, hrv)
+                    }
                     if (now - lastPpgMsgMs >= 1000L) {
                         lastPpgMsgMs = now
-                        appendRxMessage("PPG hr=${hr} conf=${conf} snr=${snr} frame=${frameId}")
+                        appendRxMessage("PPG hr=${hr} hrv=${hrv} hrv_conf=${hrvConf} conf=${conf} snr=${snr} frame=${frameId}")
                     }
                 }
                 return true
