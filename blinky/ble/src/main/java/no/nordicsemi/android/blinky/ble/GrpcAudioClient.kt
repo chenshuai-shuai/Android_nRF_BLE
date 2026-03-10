@@ -23,6 +23,10 @@ import traini.TrainiProto
 
 object GrpcAudioClient {
     private const val TAG = "GrpcAudioClient"
+    private val USER_ID_KEY: Metadata.Key<String> =
+        Metadata.Key.of("user-id", Metadata.ASCII_STRING_MARSHALLER)
+    private val SESSION_ID_KEY: Metadata.Key<String> =
+        Metadata.Key.of("session-id", Metadata.ASCII_STRING_MARSHALLER)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var channel: ManagedChannel? = null
     private var requestObserver: StreamObserver<TrainiProto.AudioChunk>? = null
@@ -39,8 +43,9 @@ object GrpcAudioClient {
     @Volatile private var closingStream: Boolean = false
     private var connectivityListener: ((ConnectivityState) -> Unit)? = null
 
-    private var host: String = "3.81.218.211"
+    private var host: String = "3.94.247.3"
     private var port: Int = 50051
+    private var userId: String = "demo_user"
     private var heartbeatIntervalMs: Long = 60_000L
     private var sentCounter: Long = 0
 
@@ -155,6 +160,14 @@ object GrpcAudioClient {
     fun setStreamErrorListener(listener: ((String) -> Unit)?) {
         streamErrorListener = listener
     }
+
+    fun setUserId(userId: String) {
+        val trimmed = userId.trim()
+        if (trimmed.isNotEmpty()) {
+            this.userId = trimmed
+        }
+    }
+
     fun setSendPaused(paused: Boolean) {
         sendPaused = paused
         if (paused) {
@@ -171,8 +184,8 @@ object GrpcAudioClient {
     fun endConversation(sessionId: String) {
         val ch = channel ?: return
         val metadata = Metadata().apply {
-            put(Metadata.Key.of("user-id", Metadata.ASCII_STRING_MARSHALLER), "demo_user")
-            put(Metadata.Key.of("session-id", Metadata.ASCII_STRING_MARSHALLER), sessionId)
+            put(USER_ID_KEY, userId)
+            put(SESSION_ID_KEY, sessionId)
         }
         val stub = ConversationServiceGrpc.newBlockingStub(ch)
             .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata))
@@ -262,9 +275,9 @@ object GrpcAudioClient {
         GrpcStatusStore.setState("CONNECTING")
         GrpcStatusStore.setLastMessage("connecting $host:$port")
         val metadata = Metadata().apply {
-            put(Metadata.Key.of("user-id", Metadata.ASCII_STRING_MARSHALLER), "demo_user")
+            put(USER_ID_KEY, userId)
             currentSessionId?.let {
-                put(Metadata.Key.of("session-id", Metadata.ASCII_STRING_MARSHALLER), it)
+                put(SESSION_ID_KEY, it)
             }
         }
         val ch = channel ?: return
