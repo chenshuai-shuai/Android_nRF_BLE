@@ -88,13 +88,20 @@ internal fun BlinkyScreen(
                     val waitingSeconds by viewModel.waitingResponseSeconds.collectAsStateWithLifecycle()
                     val sessionReady by viewModel.conversationSessionReady.collectAsStateWithLifecycle()
                     val ppgMessages = rxMessages.filter { it.startsWith("PPG ") }
-                    val imuMessages = rxMessages.filter { it.startsWith("IMU ") }
+                    val imuMessages = rxMessages.filter {
+                        it.startsWith("IMU ") || it.startsWith("IMU_RAW ")
+                    }
                     val gpsMessages = rxMessages.filter { it.startsWith("GPS ") }
                     val lastPpg = ppgMessages.lastOrNull()
                     val lastImu = imuMessages.lastOrNull()
                     val lastGps = gpsMessages.lastOrNull()
+                    val saveMessages = rxMessages.filter { it.startsWith("SAVE ") }
+                    val lastSave = saveMessages.lastOrNull()
                     val sensorMessages = rxMessages.filter {
-                        it.startsWith("PPG ") || it.startsWith("IMU ") || it.startsWith("GPS ")
+                        it.startsWith("PPG ") ||
+                            it.startsWith("IMU ") ||
+                            it.startsWith("IMU_RAW ") ||
+                            it.startsWith("GPS ")
                     }
 
                     LaunchedEffect(gpsState) {
@@ -174,12 +181,16 @@ internal fun BlinkyScreen(
                             Text(text = "gRPC Last: $grpcLastMessage")
                         }
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text(text = "Audio Stats")
+                    Text(text = "Audio Stats")
                         Text(text = "Packets: ${audioStats.packets}  Bytes: ${audioStats.bytes}")
                         Text(text = "Frames: ${audioStats.frames}  Dropped: ${audioStats.droppedFrames}")
                         Text(text = "Last Seq: ${audioStats.lastSeq}")
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text(text = "Recording: ${if (recording) "ON" else "OFF"} (auto)")
+                    Text(text = "Recording: ${if (recording) "ON" else "OFF"} (auto)")
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(text = "Save Status")
+                    Text(text = lastSave ?: "(no saves yet)")
                         if (lastSavedPath != null) {
                             Text(text = "Saved: $lastSavedPath")
                         }

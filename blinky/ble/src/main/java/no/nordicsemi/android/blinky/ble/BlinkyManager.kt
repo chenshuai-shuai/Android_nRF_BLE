@@ -53,6 +53,18 @@ private class BlinkyManagerImpl(
     private val device: BluetoothDevice,
 ): BleManager(context), Blinky {
     private val scope = CoroutineScope(Dispatchers.IO)
+    private val dataLogger = DataLogger(context)
+
+    init {
+        dataLogger.setOnSaved { msg ->
+            appendRxMessage("SAVE $msg")
+            // Ensure each saved file has at least one record of each sensor (if available).
+            lastPpgLine?.let { dataLogger.appendSnapshot(it) }
+            lastImuLine?.let { dataLogger.appendSnapshot(it) }
+            lastImuRawLine?.let { dataLogger.appendSnapshot(it) }
+            lastGpsLine?.let { dataLogger.appendSnapshot(it) }
+        }
+    }
 
     // Re-map: LED -> RX (write without response), Button -> TX (notify)
     private var ledCharacteristic: BluetoothGattCharacteristic? = null
@@ -158,8 +170,13 @@ private class BlinkyManagerImpl(
     private val playbackMaxLowFrames = 20
     private var lastPpgMsgMs: Long = 0L
     private var lastImuMsgMs: Long = 0L
+    private var lastImuRawMsgMs: Long = 0L
     private var lastGpsMsgMs: Long = 0L
     private var lastSensorGrpcLogMs: Long = 0L
+    @Volatile private var lastPpgLine: String? = null
+    @Volatile private var lastImuLine: String? = null
+    @Volatile private var lastImuRawLine: String? = null
+    @Volatile private var lastGpsLine: String? = null
     private val fusedLocationClient: FusedLocationProviderClient by lazy {
         LocationServices.getFusedLocationProviderClient(context)
     }
@@ -321,6 +338,7 @@ private class BlinkyManagerImpl(
 
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun initialize() {
+        dataLogger.start()
         // Enable notifications for the TX characteristic (from nRF to App).
         setNotificationCallback(buttonCharacteristic).with(buttonCallback)
         enableNotifications(buttonCharacteristic).enqueue()
@@ -382,6 +400,7 @@ private class BlinkyManagerImpl(
     override fun onServicesInvalidated() {
         ledCharacteristic = null
         buttonCharacteristic = null
+        dataLogger.stop()
         downlinkTestJob?.cancel()
         downlinkTestJob = null
         GrpcSensorClient.stop()
@@ -553,6 +572,10 @@ private class BlinkyManagerImpl(
         _gpsData.value = gps
         _gpsState.value = GpsState.READY
         GrpcSensorClient.updateGps(gps.lat, gps.lon)
+        val gpsLine =
+            "${System.currentTimeMillis()},GPS,lat=${gps.lat},lon=${gps.lon},acc=${gps.accuracyM ?: -1f},spd=${gps.speedMps ?: -1f},alt=${gps.altM ?: -1.0}"
+        dataLogger.append(gpsLine)
+        lastGpsLine = gpsLine
 
         val now = System.currentTimeMillis()
         if (now - lastGpsMsgMs >= 2000L) {
@@ -1020,6 +1043,11 @@ private class BlinkyManagerImpl(
         }
     }
 
+    private fun imuTempCenti(tempLsb: Int): Int {
+        // Match nRF: temp_centi = temp_lsb * 10000 / 13248 + 2500
+        return (tempLsb * 10000 / 13248) + 2500
+    }
+
     private fun appendRxMessage(msg: String) {
         val updated = _rxMessages.value + msg
         _rxMessages.value = updated.takeLast(40)
@@ -1053,6 +1081,10 @@ private class BlinkyManagerImpl(
                     if (hr in 20..260) {
                         GrpcSensorClient.updatePpg(hr, hrv)
                     }
+                    val ppgLine =
+                        "${now},PPG,hr=${hr},hrv=${hrv},hrv_conf=${hrvConf},conf=${conf},snr=${snr},frame=${frameId}"
+                    dataLogger.append(ppgLine)
+                    lastPpgLine = ppgLine
                     if (now - lastPpgMsgMs >= 1000L) {
                         lastPpgMsgMs = now
                         appendRxMessage("PPG hr=${hr} hrv=${hrv} hrv_conf=${hrvConf} conf=${conf} snr=${snr} frame=${frameId}")
@@ -1062,13 +1094,44 @@ private class BlinkyManagerImpl(
             }
             APP_DATA_PART_IMU -> {
                 if (payloadLen >= 10) {
+                    val ver = u8(bytes, payloadOff)
+                    val type = u8(bytes, payloadOff + 1)
                     val seq = le16(bytes, payloadOff + 2)
-                    val action = u8(bytes, payloadOff + 4)
-                    val conf = u8(bytes, payloadOff + 5)
                     val now = System.currentTimeMillis()
-                    if (now - lastImuMsgMs >= 1000L) {
+                    if (type == 2 && payloadLen >= 10) {
+                        val action = u8(bytes, payloadOff + 4)
+                        val conf = u8(bytes, payloadOff + 5)
+                        val imuLine =
+                            "${now},IMU,seq=${seq},action=${imuActionName(action)},conf=${conf}"
+                        dataLogger.append(imuLine)
+                        lastImuLine = imuLine
+                        if (now - lastImuMsgMs >= 1000L) {
+                            lastImuMsgMs = now
+                            appendRxMessage("IMU seq=${seq} action=${imuActionName(action)} conf=${conf}")
+                        }
+                    } else if (type == 3 && payloadLen >= 22) {
+                        val ax = leI16(bytes, payloadOff + 4)
+                        val ay = leI16(bytes, payloadOff + 6)
+                        val az = leI16(bytes, payloadOff + 8)
+                        val gx = leI16(bytes, payloadOff + 10)
+                        val gy = leI16(bytes, payloadOff + 12)
+                        val gz = leI16(bytes, payloadOff + 14)
+                        val tLsb = leI16(bytes, payloadOff + 16)
+                        val tC = imuTempCenti(tLsb)
+                        val imuRawLine =
+                            "${now},IMU_RAW,seq=${seq},ax=${ax},ay=${ay},az=${az},gx=${gx},gy=${gy},gz=${gz},temp_centi=${tC}"
+                        dataLogger.append(imuRawLine)
+                        lastImuRawLine = imuRawLine
+                        if (now - lastImuRawMsgMs >= 1000L) {
+                            lastImuRawMsgMs = now
+                            appendRxMessage(
+                                "IMU_RAW seq=${seq} ax=${ax} ay=${ay} az=${az} " +
+                                    "gx=${gx} gy=${gy} gz=${gz} temp=${tC / 100}.${(kotlin.math.abs(tC) % 100).toString().padStart(2, '0')}"
+                            )
+                        }
+                    } else if (ver == 1 && now - lastImuMsgMs >= 1000L) {
                         lastImuMsgMs = now
-                        appendRxMessage("IMU seq=${seq} action=${imuActionName(action)} conf=${conf}")
+                        appendRxMessage("IMU seq=${seq} (type=${type})")
                     }
                 }
                 return true
@@ -1329,7 +1392,8 @@ private class BlinkyManagerImpl(
     }
 
     private suspend fun sendBleAudioFrame(pcm: ByteArray, seq: Int) {
-        val mtuPayload = 48
+        // Use a larger payload to reduce fragment count (MTU is 65 on this phone).
+        val mtuPayload = 62
         val fragCnt = ((pcm.size + mtuPayload - 1) / mtuPayload).coerceAtLeast(1)
         var offset = 0
         for (frag in 0 until fragCnt) {
