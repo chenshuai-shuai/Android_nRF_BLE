@@ -42,6 +42,7 @@ import no.nordicsemi.android.blinky.spec.GpsData
 import no.nordicsemi.android.blinky.spec.GpsState
 import no.nordicsemi.android.blinky.spec.GrpcStatusStore
 import timber.log.Timber
+import java.io.ByteArrayOutputStream
 
 class BlinkyManager(
     context: Context,
@@ -52,6 +53,7 @@ private class BlinkyManagerImpl(
     context: Context,
     private val device: BluetoothDevice,
 ): BleManager(context), Blinky {
+    private val appContext = context.applicationContext
     private val scope = CoroutineScope(Dispatchers.IO)
     private val dataLogger = DataLogger(context)
 
@@ -184,6 +186,9 @@ private class BlinkyManagerImpl(
     private var gpsCurrentToken: CancellationTokenSource? = null
     private var platformLocationListener: LocationListener? = null
 
+    private var recordBuffer = ByteArrayOutputStream()
+    private var recordingActive = false
+
     private companion object {
         private const val UPLINK_MAGIC0 = 0xC3
         private const val UPLINK_MAGIC1 = 0x5C
@@ -282,6 +287,9 @@ private class BlinkyManagerImpl(
         _conversationSessionId.value = null
         _waitingResponseSeconds.value = 0L
         _conversationState.value = ConversationState.IDLE
+        recordBuffer.reset()
+        recordingActive = false
+        _recording.value = false
 
         val wasConnected = isReady
         // If the device wasn't connected, it means that ConnectRequest was still pending.
@@ -610,13 +618,42 @@ private class BlinkyManagerImpl(
     }
 
     override suspend fun startRecording() {
-        // Recording to WAV is disabled in this mode (App only forwards).
-        _recording.value = false
-        _lastSavedPath.value = "RECORDING_DISABLED"
+        recordBuffer.reset()
+        recordingActive = true
+        _recording.value = true
+        _lastSavedPath.value = "RECORDING_STARTED"
     }
 
     override suspend fun stopRecording() {
+        if (!recordingActive) {
+            _recording.value = false
+            return
+        }
+        recordingActive = false
         _recording.value = false
+
+        val pcm = recordBuffer.toByteArray()
+        recordBuffer.reset()
+        if (pcm.isNotEmpty()) {
+            val stats = pcmStats(pcm)
+            Timber.tag("AudioWav").i(
+                "save wav: peak=%d rms=%d bytes=%d",
+                stats.first,
+                stats.second,
+                pcm.size
+            )
+            val res = AudioWavWriter.writePcm16leToWav(
+                context = appContext,
+                pcm16le = pcm,
+                sampleRate = 16000,
+                channels = 1,
+                prefix = "nrf_audio_manual"
+            )
+            if (res != null) {
+                _lastSavedPath.value = res.displayPath
+                appendRxMessage("SAVE_AUDIO ${res.displayPath} peak=${stats.first} rms=${stats.second}")
+            }
+        }
     }
 
     override suspend fun startConversation() {
@@ -880,6 +917,7 @@ private class BlinkyManagerImpl(
                     val decoded = decodeNrfAudioFrame(frameBytes)
                     if (decoded != null) {
                         maybeTriggerSimulatedDownlink(decoded.first, decoded.second)
+                        handleManualRecord(decoded.first, decoded.second)
                         val payload = when (decoded.second) {
                             sampleRateHz -> decoded.first
                             8000 -> resample8kTo24k(decoded.first)
@@ -1010,6 +1048,56 @@ private class BlinkyManagerImpl(
             outSample++
         }
         return Pair(out, sampleRate)
+    }
+
+    private fun handleManualRecord(pcm: ByteArray, sampleRate: Int) {
+        if (!recordingActive) return
+        if (pcm.isEmpty()) return
+        val pcm16 = when (sampleRate) {
+            16000 -> pcm
+            8000 -> upsample8kTo16k(pcm)
+            else -> return
+        }
+        recordBuffer.write(pcm16)
+    }
+
+    private fun upsample8kTo16k(pcm8: ByteArray): ByteArray {
+        if (pcm8.isEmpty()) return pcm8
+        val inSamples = pcm8.size / 2
+        val out = ByteArray(inSamples * 2 * 2)
+        var oi = 0
+        var i = 0
+        while (i + 1 < pcm8.size) {
+            val lo = pcm8[i].toInt() and 0xFF
+            val hi = pcm8[i + 1].toInt()
+            val sample = (hi shl 8) or lo
+            out[oi++] = pcm8[i]
+            out[oi++] = pcm8[i + 1]
+            out[oi++] = pcm8[i]
+            out[oi++] = pcm8[i + 1]
+            i += 2
+        }
+        return out
+    }
+
+    private fun pcmStats(pcm16: ByteArray): Pair<Int, Int> {
+        var peak = 0
+        var sum = 0L
+        var samples = 0
+        var i = 0
+        while (i + 1 < pcm16.size) {
+            val lo = pcm16[i].toInt() and 0xFF
+            val hi = pcm16[i + 1].toInt()
+            val v = (hi shl 8) or lo
+            val s = if (v and 0x8000 != 0) v - 0x10000 else v
+            val av = if (s < 0) -s else s
+            if (av > peak) peak = av
+            sum += (s.toLong() * s.toLong())
+            samples++
+            i += 2
+        }
+        val rms = if (samples > 0) (sum / samples).toInt() else 0
+        return Pair(peak, rms)
     }
 
     private fun u8(bytes: ByteArray, off: Int): Int {

@@ -186,7 +186,7 @@ internal fun BlinkyScreen(
                         Text(text = "Frames: ${audioStats.frames}  Dropped: ${audioStats.droppedFrames}")
                         Text(text = "Last Seq: ${audioStats.lastSeq}")
                         Spacer(modifier = Modifier.height(8.dp))
-                    Text(text = "Recording: ${if (recording) "ON" else "OFF"} (auto)")
+                    Text(text = "Recording: ${if (recording) "ON" else "OFF"} (manual)")
 
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(text = "Save Status")
@@ -196,9 +196,13 @@ internal fun BlinkyScreen(
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         Button(
-                            onClick = { viewModel.stopRecording() },
-                            enabled = recording
-                        ) { Text(text = "Stop & Save") }
+                            onClick = {
+                                if (recording) viewModel.stopRecording() else viewModel.startRecording()
+                            },
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        ) {
+                            Text(text = if (recording) "Stop Recording" else "Start Recording")
+                        }
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(text = "PPG Data")
                         Text(text = lastPpg ?: "(no ppg data)")
