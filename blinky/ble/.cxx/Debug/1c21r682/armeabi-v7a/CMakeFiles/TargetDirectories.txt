@@ -1,0 +1,4 @@
+C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/.cxx/Debug/1c21r682/armeabi-v7a/CMakeFiles/speexdsp.dir
+C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/.cxx/Debug/1c21r682/armeabi-v7a/CMakeFiles/speex_jni.dir
+C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/.cxx/Debug/1c21r682/armeabi-v7a/CMakeFiles/edit_cache.dir
+C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/.cxx/Debug/1c21r682/armeabi-v7a/CMakeFiles/rebuild_cache.dir

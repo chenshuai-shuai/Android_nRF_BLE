@@ -1,0 +1,1 @@
+C:\Users\Administrator\nrf52840_BLE\Android_nRF_BLE\blinky\ble\build\intermediates\cxx\Debug\1c21r682\obj\arm64-v8a

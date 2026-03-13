@@ -1,0 +1,1 @@
+C:\Users\Administrator\nrf52840_BLE\Android_nRF_BLE\blinky\ble\src\main\cpp\CMakeLists.txt

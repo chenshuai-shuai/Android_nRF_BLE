@@ -1,0 +1,46 @@
+{
+  "buildFiles": [
+    "C:\\Users\\Administrator\\nrf52840_BLE\\Android_nRF_BLE\\blinky\\ble\\src\\main\\cpp\\CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "E:\\Android_SDK\\cmake\\3.22.1\\bin\\ninja.exe",
+      "-C",
+      "C:\\Users\\Administrator\\nrf52840_BLE\\Android_nRF_BLE\\blinky\\ble\\.cxx\\Debug\\1c21r682\\x86",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "E:\\Android_SDK\\cmake\\3.22.1\\bin\\ninja.exe",
+    "-C",
+    "C:\\Users\\Administrator\\nrf52840_BLE\\Android_nRF_BLE\\blinky\\ble\\.cxx\\Debug\\1c21r682\\x86",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "speex_jni::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "x86",
+      "artifactName": "speex_jni",
+      "output": "C:\\Users\\Administrator\\nrf52840_BLE\\Android_nRF_BLE\\blinky\\ble\\build\\intermediates\\cxx\\Debug\\1c21r682\\obj\\x86\\libspeex_jni.so",
+      "runtimeFiles": []
+    },
+    "speexdsp::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "x86",
+      "artifactName": "speexdsp",
+      "output": "C:\\Users\\Administrator\\nrf52840_BLE\\Android_nRF_BLE\\blinky\\ble\\.cxx\\Debug\\1c21r682\\x86\\libspeexdsp.a"
+    }
+  },
+  "toolchains": {
+    "toolchain": {
+      "cCompilerExecutable": "E:\\Android_SDK\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe",
+      "cppCompilerExecutable": "E:\\Android_SDK\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe"
+    }
+  },
+  "cFileExtensions": [
+    "c"
+  ],
+  "cppFileExtensions": [
+    "cpp"
+  ]
+}

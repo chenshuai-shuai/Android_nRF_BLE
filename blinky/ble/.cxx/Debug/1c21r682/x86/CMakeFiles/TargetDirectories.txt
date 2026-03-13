@@ -1,0 +1,4 @@
+C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/.cxx/Debug/1c21r682/x86/CMakeFiles/speexdsp.dir
+C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/.cxx/Debug/1c21r682/x86/CMakeFiles/speex_jni.dir
+C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/.cxx/Debug/1c21r682/x86/CMakeFiles/edit_cache.dir
+C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/.cxx/Debug/1c21r682/x86/CMakeFiles/rebuild_cache.dir

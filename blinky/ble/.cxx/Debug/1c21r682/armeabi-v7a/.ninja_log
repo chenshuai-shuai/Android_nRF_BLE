@@ -1,0 +1,15 @@
+# ninja log v5
+294	896	7951107340489913	CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/fftwrap.c.o	b6aebc1f4769ad2a
+422	903	7951107341666317	CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/filterbank.c.o	c6c31d0c2f3cfe83
+620	904	7951107344159181	CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/kiss_fftr.c.o	9bc17f567af062c8
+676	905	7951107344219273	CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/kiss_fft.c.o	ddd529e14484873
+740	1376	7951107349061995	CMakeFiles/speex_jni.dir/speex_jni.cpp.o	f009283c6095040e
+2	341	7951111044402336	CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/preprocess.c.o	a4243d23b1c9645d
+46	342	7951111044442335	CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/mdf.c.o	2e6d4d17039e85df
+87	342	7951111044582340	CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/filterbank.c.o	88e6cba737f4bc9c
+133	343	7951111045052359	CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/fftwrap.c.o	b620e60eeedb6af6
+186	343	7951111045497616	CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/kiss_fft.c.o	51afaf2da1471329
+244	369	7951111045927608	CMakeFiles/speex_jni.dir/speex_jni.cpp.o	87d117c628e4dd23
+293	389	7951111046137614	CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/kiss_fftr.c.o	53fce6444b380a18
+389	553	7951111047241978	libspeexdsp.a	d857c6f24c5cacaf
+553	698	7951111049204284	C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/build/intermediates/cxx/Debug/1c21r682/obj/armeabi-v7a/libspeex_jni.so	e06cfc8d00ddec87

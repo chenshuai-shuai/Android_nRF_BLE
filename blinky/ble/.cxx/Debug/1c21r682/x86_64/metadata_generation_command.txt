@@ -1,0 +1,19 @@
+                        -HC:\Users\Administrator\nrf52840_BLE\Android_nRF_BLE\blinky\ble\src\main\cpp
+-DCMAKE_SYSTEM_NAME=Android
+-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+-DCMAKE_SYSTEM_VERSION=21
+-DANDROID_PLATFORM=android-21
+-DANDROID_ABI=x86_64
+-DCMAKE_ANDROID_ARCH_ABI=x86_64
+-DANDROID_NDK=E:\Android_SDK\ndk\27.0.12077973
+-DCMAKE_ANDROID_NDK=E:\Android_SDK\ndk\27.0.12077973
+-DCMAKE_TOOLCHAIN_FILE=E:\Android_SDK\ndk\27.0.12077973\build\cmake\android.toolchain.cmake
+-DCMAKE_MAKE_PROGRAM=E:\Android_SDK\cmake\3.22.1\bin\ninja.exe
+-DCMAKE_CXX_FLAGS=-std=c++17
+-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=C:\Users\Administrator\nrf52840_BLE\Android_nRF_BLE\blinky\ble\build\intermediates\cxx\Debug\1c21r682\obj\x86_64
+-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=C:\Users\Administrator\nrf52840_BLE\Android_nRF_BLE\blinky\ble\build\intermediates\cxx\Debug\1c21r682\obj\x86_64
+-DCMAKE_BUILD_TYPE=Debug
+-BC:\Users\Administrator\nrf52840_BLE\Android_nRF_BLE\blinky\ble\.cxx\Debug\1c21r682\x86_64
+-GNinja
+                        Build command args: []
+                        Version: 2

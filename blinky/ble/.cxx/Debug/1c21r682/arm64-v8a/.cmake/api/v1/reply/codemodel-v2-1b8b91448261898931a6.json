@@ -1,0 +1,69 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"jsonFile" : "directory-.-Debug-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6.0"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "speex_dsp",
+					"targetIndexes" : 
+					[
+						0,
+						1
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "speex_jni::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-speex_jni-Debug-484bec15170dfd89c687.json",
+					"name" : "speex_jni",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "speexdsp::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-speexdsp-Debug-f5afd461e9cf567f2202.json",
+					"name" : "speexdsp",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/.cxx/Debug/1c21r682/arm64-v8a",
+		"source" : "C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/src/main/cpp"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

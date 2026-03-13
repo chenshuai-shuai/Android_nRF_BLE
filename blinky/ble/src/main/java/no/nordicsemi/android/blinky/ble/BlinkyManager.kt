@@ -188,6 +188,8 @@ private class BlinkyManagerImpl(
 
     private var recordBuffer = ByteArrayOutputStream()
     private var recordingActive = false
+    private val useSpeexDsp = true
+    private val speexDsp = SpeexDspProcessor(sampleRate = 16000, frameSize = 160)
 
     private companion object {
         private const val UPLINK_MAGIC0 = 0xC3
@@ -917,12 +919,17 @@ private class BlinkyManagerImpl(
                     val decoded = decodeNrfAudioFrame(frameBytes)
                     if (decoded != null) {
                         maybeTriggerSimulatedDownlink(decoded.first, decoded.second)
-                        handleManualRecord(decoded.first, decoded.second)
+                        val processed = if (useSpeexDsp && decoded.second == 16000) {
+                            speexDsp.processPcm16le(decoded.first)
+                        } else {
+                            decoded.first
+                        }
+                        handleManualRecord(processed, decoded.second)
                         val payload = when (decoded.second) {
-                            sampleRateHz -> decoded.first
-                            8000 -> resample8kTo24k(decoded.first)
-                            16000 -> resample16kTo24k(decoded.first)
-                            else -> resample16kTo24k(decoded.first)
+                            sampleRateHz -> processed
+                            8000 -> resample8kTo24k(processed)
+                            16000 -> resample16kTo24k(processed)
+                            else -> resample16kTo24k(processed)
                         }
                         scope.launch {
                             if (_conversationState.value == ConversationState.TALKING) {

@@ -8,6 +8,20 @@ plugins {
 
 android {
     namespace = "no.nordicsemi.android.blinky.transport_ble"
+
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
+    }
 }
 
 dependencies {
