@@ -1100,6 +1100,28 @@ private class BlinkyManagerImpl(
         return Pair(peak, rms)
     }
 
+    private fun deEmphasisPcm16(pcm16: ByteArray, alpha: Float): ByteArray {
+        if (pcm16.isEmpty()) return pcm16
+        val out = ByteArray(pcm16.size)
+        var prev = 0.0f
+        var i = 0
+        while (i + 1 < pcm16.size) {
+            val lo = pcm16[i].toInt() and 0xFF
+            val hi = pcm16[i + 1].toInt()
+            var v = (hi shl 8) or lo
+            if (v and 0x8000 != 0) v -= 0x10000
+            val y = v + alpha * prev
+            prev = y
+            var yi = y.toInt()
+            if (yi > 32767) yi = 32767
+            if (yi < -32768) yi = -32768
+            out[i] = (yi and 0xFF).toByte()
+            out[i + 1] = ((yi shr 8) and 0xFF).toByte()
+            i += 2
+        }
+        return out
+    }
+
     private fun u8(bytes: ByteArray, off: Int): Int {
         return bytes[off].toInt() and 0xFF
     }
