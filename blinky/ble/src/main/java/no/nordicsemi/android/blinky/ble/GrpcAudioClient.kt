@@ -43,7 +43,7 @@ object GrpcAudioClient {
     @Volatile private var closingStream: Boolean = false
     private var connectivityListener: ((ConnectivityState) -> Unit)? = null
 
-    private var host: String = "3.94.247.3"
+    private var host: String = "3.92.76.102"
     private var port: Int = 50051
     private var userId: String = "demo_user"
     private var heartbeatIntervalMs: Long = 60_000L

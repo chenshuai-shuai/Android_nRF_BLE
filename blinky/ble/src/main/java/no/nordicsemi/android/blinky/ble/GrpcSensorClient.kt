@@ -43,6 +43,20 @@ object GrpcSensorClient {
     @Volatile private var latestLat: Double? = null
     @Volatile private var latestLon: Double? = null
     @Volatile private var running: Boolean = false
+    private val imuLock = Any()
+    private val imuBuffer: ArrayList<ImuSampleLite> = ArrayList(128)
+
+    private data class ImuSampleLite(
+        val seq: Int,
+        val ax: Int,
+        val ay: Int,
+        val az: Int,
+        val gx: Int,
+        val gy: Int,
+        val gz: Int,
+        val tempLsb: Int,
+        val tempC: Float
+    )
 
     fun configure(host: String, port: Int, deviceId: String, intervalMs: Long = 1000L) {
         this.host = host
@@ -60,6 +74,25 @@ object GrpcSensorClient {
     fun updateGps(lat: Double, lon: Double) {
         latestLat = lat
         latestLon = lon
+    }
+
+    fun addImuSample(
+        seq: Int,
+        ax: Int,
+        ay: Int,
+        az: Int,
+        gx: Int,
+        gy: Int,
+        gz: Int,
+        tempLsb: Int,
+        tempC: Float
+    ) {
+        synchronized(imuLock) {
+            if (imuBuffer.size >= 256) {
+                imuBuffer.clear()
+            }
+            imuBuffer.add(ImuSampleLite(seq, ax, ay, az, gx, gy, gz, tempLsb, tempC))
+        }
     }
 
     fun start() {
@@ -175,6 +208,15 @@ object GrpcSensorClient {
 
     private fun sendPacket(hr: Int, hrv: Int, lat: Double, lon: Double) {
         val ts = isoUtcNow()
+        val imuSamples = synchronized(imuLock) {
+            if (imuBuffer.isEmpty()) {
+                emptyList()
+            } else {
+                val copy = imuBuffer.toList()
+                imuBuffer.clear()
+                copy
+            }
+        }
         val req = CollarProto.SensorDataRequest.newBuilder()
             .setDeviceId(deviceId)
             .setTimestamp(ts)
@@ -185,6 +227,21 @@ object GrpcSensorClient {
                     .setLat(lat)
                     .setLon(lon)
                     .build()
+            )
+            .addAllImuSamples(
+                imuSamples.map {
+                    CollarProto.IMUSample.newBuilder()
+                        .setSeq(it.seq)
+                        .setAxLsb(it.ax)
+                        .setAyLsb(it.ay)
+                        .setAzLsb(it.az)
+                        .setGxLsb(it.gx)
+                        .setGyLsb(it.gy)
+                        .setGzLsb(it.gz)
+                        .setTempLsb(it.tempLsb)
+                        .setTempC(it.tempC)
+                        .build()
+                }
             )
             .build()
         val obs = requestObserver ?: return
@@ -197,13 +254,14 @@ object GrpcSensorClient {
             reconnectBackoffMs = 1000L
             nextReconnectAllowedAtMs = 0L
             Timber.tag(TAG).i(
-                "[SENSOR_TX] device_id=%s ts=%s hr=%d hrv=%d lat=%.6f lon=%.6f",
+                "[SENSOR_TX] device_id=%s ts=%s hr=%d hrv=%d lat=%.6f lon=%.6f imu=%d",
                 deviceId,
                 ts,
                 hr,
                 hrv,
                 lat,
-                lon
+                lon,
+                imuSamples.size
             )
         } catch (t: Throwable) {
             Timber.tag(TAG).w("onNext failed: %s", t.message ?: "unknown")

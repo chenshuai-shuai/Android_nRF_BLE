@@ -15,6 +15,7 @@ message SensorDataRequest {
   int32 heart_rate = 3;
   int32 hrv = 4;
   GpsCoordinates gps = 5;
+  repeated IMUSample imu_samples = 6;
 }
 
 message GpsCoordinates {
@@ -22,9 +23,20 @@ message GpsCoordinates {
   double lon = 2;
 }
 
+message IMUSample {
+  int32 seq = 1;
+  int32 ax_lsb = 2;
+  int32 ay_lsb = 3;
+  int32 az_lsb = 4;
+  int32 gx_lsb = 5;
+  int32 gy_lsb = 6;
+  int32 gz_lsb = 7;
+  int32 temp_lsb = 8;
+  float temp_c = 9;
+}
+
 message StreamAck {
   bool success = 1;
   string message = 2;
   int32 packets_processed = 3;
 }
-

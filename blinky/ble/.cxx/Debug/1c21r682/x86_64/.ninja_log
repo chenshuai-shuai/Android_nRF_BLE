@@ -13,3 +13,5 @@
 290	398	7951111064394001	CMakeFiles/speex_jni.dir/speex_jni.cpp.o	c52e92d01fd422ab
 363	533	7951111065259084	libspeexdsp.a	d857c6f24c5cacaf
 533	709	7951111067460330	C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/build/intermediates/cxx/Debug/1c21r682/obj/x86_64/libspeex_jni.so	d49a7ef3cc771a03
+21	2254	7955215622981175	CMakeFiles/speex_jni.dir/speex_jni.cpp.o	c52e92d01fd422ab
+2259	3150	7955215633038736	C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/build/intermediates/cxx/Debug/1c21r682/obj/x86_64/libspeex_jni.so	d49a7ef3cc771a03

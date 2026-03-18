@@ -131,9 +131,17 @@ private class BlinkyManagerImpl(
     @Volatile private var lastAudioRxMs: Long = 0L
     @Volatile private var playbackAllowed: Boolean = false
     @Volatile private var playbackForceDrain: Boolean = false
-    private var downlinkJob: Job? = null
-    private val downlinkChunks: ArrayList<ByteArray> = ArrayList()
     private var downlinkSeq: Int = 1
+    private var downlinkStreamJob: Job? = null
+    private val downlinkFrameLock = Any()
+    private val downlinkFrameQueue: ArrayDeque<ByteArray> = ArrayDeque()
+    private var downlinkPcmCarry = ByteArray(0)
+    @Volatile private var downlinkGrpcEos: Boolean = false
+    @Volatile private var downlinkBleStarted: Boolean = false
+    private val downlinkReplyLock = Any()
+    private val downlinkReplyChunks: ArrayList<ByteArray> = ArrayList()
+    private var downlinkReplyBytes: Int = 0
+    @Volatile private var downlinkReplyActive: Boolean = false
     private var nrfPlaybackPending: Boolean = false
     @Volatile private var nrfMicPaused: Boolean = false
     @Volatile private var nrfBufferFull: Boolean = false
@@ -199,6 +207,11 @@ private class BlinkyManagerImpl(
         private const val AUDIO_CODEC_PCM16_LE = 1
         private const val AUDIO_CODEC_IMA_ADPCM_8K = 2
         private const val AUDIO_CODEC_HDR_LEN = 8
+        private const val NRF_DOWNLINK_PCM_FRAME_SAMPLES = 160
+        private const val NRF_DOWNLINK_PCM_FRAME_BYTES = NRF_DOWNLINK_PCM_FRAME_SAMPLES * 2
+        private const val NRF_DOWNLINK_START_FRAMES = 30
+        private const val NRF_DOWNLINK_RESUME_FRAMES = 12
+        private const val NRF_DOWNLINK_FRAME_MS = 10L
         private const val APP_DATA_PART_PPG = 3
         private const val APP_DATA_PART_IMU = 4
     }
@@ -688,6 +701,16 @@ private class BlinkyManagerImpl(
                 nrfMicPaused = true
             }
             GrpcAudioClient.setSendPaused(true)
+            if (useNrfSpeaker && !downlinkReplyActive) {
+                synchronized(downlinkFrameLock) {
+                    downlinkFrameQueue.clear()
+                    downlinkPcmCarry = ByteArray(0)
+                    downlinkGrpcEos = false
+                }
+                resetDownlinkReplyBuffer()
+                downlinkBleStarted = false
+                downlinkReplyActive = true
+            }
             updateKeepalive()
         }
         GrpcAudioClient.setSessionStartListener {
@@ -710,7 +733,7 @@ private class BlinkyManagerImpl(
             }
             if (useNrfSpeaker) {
                 val pcm16 = resample24kTo16k(pcm)
-                downlinkChunks.add(pcm16)
+                enqueueDownlinkStream(pcm16)
             } else {
                 enqueueAudio(pcm)
             }
@@ -721,7 +744,8 @@ private class BlinkyManagerImpl(
                 startWaitingCountdown()
             }
             if (useNrfSpeaker) {
-                startDownlinkSend()
+                downlinkReplyActive = false
+                enqueueDownlinkEos()
             } else {
                 // Wait until playback buffer drains before allowing next talk
                 playbackAllowed = true
@@ -742,7 +766,7 @@ private class BlinkyManagerImpl(
                     }
                 }
             }
-            if (nrfMicPaused) {
+            if (!useNrfSpeaker && nrfMicPaused) {
                 sendBleControl("APP_MIC_RESUME")
                 nrfMicPaused = false
             }
@@ -849,13 +873,20 @@ private class BlinkyManagerImpl(
         playbackAllowed = false
         playbackDraining = false
         playbackForceDrain = false
-        if (downlinkJob?.isActive == true || nrfPlaybackPending) {
+        if (downlinkStreamJob?.isActive == true || nrfPlaybackPending) {
             Timber.tag("GrpcAudioClient").w("gRPC error during NRF downlink; keep BLE send in progress")
         } else {
             nrfPlaybackPending = false
-            downlinkChunks.clear()
-            downlinkJob?.cancel()
-            downlinkJob = null
+            synchronized(downlinkFrameLock) {
+                downlinkFrameQueue.clear()
+                downlinkPcmCarry = ByteArray(0)
+                downlinkGrpcEos = false
+            }
+            resetDownlinkReplyBuffer()
+            downlinkReplyActive = false
+            downlinkBleStarted = false
+            downlinkStreamJob?.cancel()
+            downlinkStreamJob = null
         }
         if (id != null) {
             GrpcAudioClient.endConversation(id)
@@ -968,11 +999,9 @@ private class BlinkyManagerImpl(
         if (frameMs <= 0) return
         simulatedUplinkAccumMs += frameMs
         if (simulatedUplinkAccumMs < simulatedUplinkWindowMs) return
-        if (downlinkJob?.isActive == true || nrfPlaybackPending) return
+        if (downlinkStreamJob?.isActive == true || nrfPlaybackPending) return
 
         val clip = simulatedClip16k ?: generateTestPattern16k().also { simulatedClip16k = it }
-        downlinkChunks.clear()
-        downlinkChunks.add(clip)
         simulatedUplinkAccumMs = 0L
         simulatedRound += 1
         Timber.tag("GrpcAudioClient").i(
@@ -981,7 +1010,8 @@ private class BlinkyManagerImpl(
             simulatedUplinkWindowMs,
             clip.size
         )
-        startDownlinkSend()
+        enqueueDownlinkStream(clip)
+        enqueueDownlinkEos()
     }
 
     private fun decodeNrfAudioFrame(frame: ByteArray): Pair<ByteArray, Int>? {
@@ -1055,6 +1085,92 @@ private class BlinkyManagerImpl(
             outSample++
         }
         return Pair(out, sampleRate)
+    }
+
+    private fun encodeNrfDownlinkAdpcmFrame(pcm16: ByteArray): ByteArray? {
+        if (pcm16.size < 4 || (pcm16.size and 1) != 0) return null
+        val sampleCount = pcm16.size / 2
+        if (sampleCount < 2 || sampleCount > 255) return null
+
+        val stepTable = intArrayOf(
+            7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+            19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+            50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+            130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+            337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+            876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+            2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+            5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+            15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+        )
+        val indexTable = intArrayOf(
+            -1, -1, -1, -1, 2, 4, 6, 8,
+            -1, -1, -1, -1, 2, 4, 6, 8
+        )
+
+        var predictor = leI16(pcm16, 0)
+        var index = 0
+        val nibbleCount = sampleCount - 1
+        val dataBytes = (nibbleCount + 1) / 2
+        val out = ByteArray(AUDIO_CODEC_HDR_LEN + dataBytes)
+        out[0] = AUDIO_CODEC_IMA_ADPCM_8K.toByte()
+        out[1] = 16
+        out[2] = 1
+        out[3] = 4
+        out[4] = (predictor and 0xFF).toByte()
+        out[5] = ((predictor shr 8) and 0xFF).toByte()
+        out[6] = 0
+        out[7] = sampleCount.toByte()
+
+        var outOff = AUDIO_CODEC_HDR_LEN
+        var lowNibble = true
+        var packed = 0
+        for (sampleIdx in 1 until sampleCount) {
+            var diff = leI16(pcm16, sampleIdx * 2) - predictor
+            var nibble = 0
+            var step = stepTable[index]
+            var vpdiff = step shr 3
+
+            if (diff < 0) {
+                nibble = 0x08
+                diff = -diff
+            }
+            if (diff >= step) {
+                nibble = nibble or 0x04
+                diff -= step
+                vpdiff += step
+            }
+            step = step shr 1
+            if (diff >= step) {
+                nibble = nibble or 0x02
+                diff -= step
+                vpdiff += step
+            }
+            step = step shr 1
+            if (diff >= step) {
+                nibble = nibble or 0x01
+                vpdiff += step
+            }
+
+            predictor = if ((nibble and 0x08) != 0) predictor - vpdiff else predictor + vpdiff
+            predictor = predictor.coerceIn(-32768, 32767)
+            index = (index + indexTable[nibble and 0x0F]).coerceIn(0, 88)
+
+            if (lowNibble) {
+                packed = nibble and 0x0F
+                lowNibble = false
+            } else {
+                packed = packed or ((nibble and 0x0F) shl 4)
+                out[outOff++] = packed.toByte()
+                packed = 0
+                lowNibble = true
+            }
+        }
+        if (!lowNibble) {
+            out[outOff++] = packed.toByte()
+        }
+        out[6] = index.toByte()
+        return if (outOff == out.size) out else out.copyOf(outOff)
     }
 
     private fun handleManualRecord(pcm: ByteArray, sampleRate: Int) {
@@ -1226,17 +1342,28 @@ private class BlinkyManagerImpl(
                             lastImuMsgMs = now
                             appendRxMessage("IMU seq=${seq} action=${imuActionName(action)} conf=${conf}")
                         }
-                    } else if (type == 3 && payloadLen >= 22) {
-                        val ax = leI16(bytes, payloadOff + 4)
-                        val ay = leI16(bytes, payloadOff + 6)
-                        val az = leI16(bytes, payloadOff + 8)
-                        val gx = leI16(bytes, payloadOff + 10)
-                        val gy = leI16(bytes, payloadOff + 12)
-                        val gz = leI16(bytes, payloadOff + 14)
-                        val tLsb = leI16(bytes, payloadOff + 16)
-                        val tC = imuTempCenti(tLsb)
-                        val imuRawLine =
-                            "${now},IMU_RAW,seq=${seq},ax=${ax},ay=${ay},az=${az},gx=${gx},gy=${gy},gz=${gz},temp_centi=${tC}"
+                        } else if (type == 3 && payloadLen >= 22) {
+                            val ax = leI16(bytes, payloadOff + 4)
+                            val ay = leI16(bytes, payloadOff + 6)
+                            val az = leI16(bytes, payloadOff + 8)
+                            val gx = leI16(bytes, payloadOff + 10)
+                            val gy = leI16(bytes, payloadOff + 12)
+                            val gz = leI16(bytes, payloadOff + 14)
+                            val tLsb = leI16(bytes, payloadOff + 16)
+                            val tC = imuTempCenti(tLsb)
+                            GrpcSensorClient.addImuSample(
+                                seq = seq,
+                                ax = ax,
+                                ay = ay,
+                                az = az,
+                                gx = gx,
+                                gy = gy,
+                                gz = gz,
+                                tempLsb = tLsb,
+                                tempC = tC / 100.0f
+                            )
+                            val imuRawLine =
+                                "${now},IMU_RAW,seq=${seq},ax=${ax},ay=${ay},az=${az},gx=${gx},gy=${gy},gz=${gz},temp_centi=${tC}"
                         dataLogger.append(imuRawLine)
                         lastImuRawLine = imuRawLine
                         if (now - lastImuRawMsgMs >= 1000L) {
@@ -1429,92 +1556,212 @@ private class BlinkyManagerImpl(
     }
 
     private fun startDownlinkSend() {
-        if (downlinkJob?.isActive == true) return
-        if (downlinkChunks.isEmpty()) {
-            nrfPlaybackPending = false
-            if (_conversationState.value == ConversationState.WAITING_RESPONSE) {
-                _conversationState.value = ConversationState.READY
-                _waitingResponseSeconds.value = 0L
-                updateKeepalive()
-            }
-            GrpcAudioClient.setSendPaused(false)
-            return
-        }
-        if (ledCharacteristic == null) {
-            downlinkChunks.clear()
-            nrfPlaybackPending = false
-            GrpcAudioClient.setSendPaused(false)
-            return
-        }
-        nrfPlaybackPending = true
-        nrfBufferFull = false
-        nrfReady = false
-        downlinkJob = scope.launch {
-            sendBleControl("APP_READY?")
-            val ready = waitForNrfReady(3000L)
-            if (!ready) {
-                Timber.tag("GrpcAudioClient").w("BLE NRF_READY timeout")
-                nrfPlaybackPending = false
-                downlinkJob = null
-                GrpcAudioClient.setSendPaused(false)
-                return@launch
-            }
-            Timber.tag("GrpcAudioClient").i("BLE APP_PLAY_START")
-            sendBleControl("APP_PLAY_START")
-            val frameBytes = (nrfSampleRateHz / 50) * (bitsPerSample / 8) // 20ms @16k
-            var seq = downlinkSeq
-            val buffer = ArrayList<ByteArray>(downlinkChunks)
-            downlinkChunks.clear()
-            for (chunk in buffer) {
-                var offset = 0
-                while (offset < chunk.size) {
-                    val remaining = chunk.size - offset
-                    val take = minOf(frameBytes, remaining)
-                    val frame = if (take == frameBytes) {
-                        chunk.copyOfRange(offset, offset + take)
-                    } else {
-                        val padded = ByteArray(frameBytes)
-                        System.arraycopy(chunk, offset, padded, 0, take)
-                        padded
-                    }
-                    while (nrfBufferFull) {
-                        delay(10L)
-                    }
-                    sendBleAudioFrame(frame, seq++)
-                    offset += take
-                }
-            }
-            sendBleAudioEnd(seq++)
-            Timber.tag("GrpcAudioClient").i("BLE APP_PLAY_END")
-            // Retry end markers to avoid occasional WNR drops.
-            delay(20L)
-            sendBleAudioEnd(seq++)
-            for (i in 0 until 3) {
-                sendBleControl("APP_PLAY_END")
-                delay(50L)
-            }
-            val done = withTimeoutOrNull<Unit>(20_000L) {
-                playDoneSignal.receive()
-            }
-            if (done == null) {
-                Timber.tag("GrpcAudioClient").w("BLE PLAY_DONE timeout")
-                nrfPlaybackPending = false
-            }
-            downlinkSeq = seq
-            downlinkJob = null
-            if (!nrfPlaybackPending) {
-                GrpcAudioClient.setSendPaused(false)
-            }
+        enqueueDownlinkEos()
+    }
+
+    private fun resetDownlinkReplyBuffer() {
+        synchronized(downlinkReplyLock) {
+            downlinkReplyChunks.clear()
+            downlinkReplyBytes = 0
         }
     }
 
-    private suspend fun sendBleAudioFrame(pcm: ByteArray, seq: Int) {
-        // Use a larger payload to reduce fragment count (MTU is 65 on this phone).
-        val mtuPayload = 62
-        val fragCnt = ((pcm.size + mtuPayload - 1) / mtuPayload).coerceAtLeast(1)
+    private fun appendDownlinkReplyChunk(pcm24: ByteArray) {
+        if (pcm24.isEmpty()) return
+        synchronized(downlinkReplyLock) {
+            downlinkReplyChunks.add(pcm24.copyOf())
+            downlinkReplyBytes += pcm24.size
+        }
+    }
+
+    private fun prepareBufferedDownlinkPlayback() {
+        val pcm24 = synchronized(downlinkReplyLock) {
+            if (downlinkReplyBytes <= 0) {
+                downlinkReplyChunks.clear()
+                downlinkReplyBytes = 0
+                null
+            } else {
+                ByteArray(downlinkReplyBytes).also { out ->
+                    var offset = 0
+                    for (chunk in downlinkReplyChunks) {
+                        System.arraycopy(chunk, 0, out, offset, chunk.size)
+                        offset += chunk.size
+                    }
+                }.also {
+                    downlinkReplyChunks.clear()
+                    downlinkReplyBytes = 0
+                }
+            }
+        } ?: run {
+            synchronized(downlinkFrameLock) {
+                downlinkGrpcEos = true
+            }
+            ensureDownlinkStreamJob()
+            return
+        }
+
+        val pcm16 = resample24kTo16k(pcm24)
+        if (pcm16.isEmpty()) {
+            synchronized(downlinkFrameLock) {
+                downlinkGrpcEos = true
+            }
+            ensureDownlinkStreamJob()
+            return
+        }
+
+        synchronized(downlinkFrameLock) {
+            val merged = if (downlinkPcmCarry.isEmpty()) {
+                pcm16
+            } else {
+                ByteArray(downlinkPcmCarry.size + pcm16.size).also { buf ->
+                    System.arraycopy(downlinkPcmCarry, 0, buf, 0, downlinkPcmCarry.size)
+                    System.arraycopy(pcm16, 0, buf, downlinkPcmCarry.size, pcm16.size)
+                }
+            }
+            var offset = 0
+            while ((merged.size - offset) >= NRF_DOWNLINK_PCM_FRAME_BYTES) {
+                val frame = merged.copyOfRange(offset, offset + NRF_DOWNLINK_PCM_FRAME_BYTES)
+                encodeNrfDownlinkAdpcmFrame(frame)?.let { downlinkFrameQueue.addLast(it) }
+                offset += NRF_DOWNLINK_PCM_FRAME_BYTES
+            }
+            if (offset < merged.size) {
+                val padded = ByteArray(NRF_DOWNLINK_PCM_FRAME_BYTES)
+                System.arraycopy(merged, offset, padded, 0, merged.size - offset)
+                encodeNrfDownlinkAdpcmFrame(padded)?.let { downlinkFrameQueue.addLast(it) }
+                downlinkPcmCarry = ByteArray(0)
+            } else {
+                downlinkPcmCarry = ByteArray(0)
+            }
+            downlinkGrpcEos = true
+        }
+        ensureDownlinkStreamJob()
+    }
+
+    private fun enqueueDownlinkStream(pcm16: ByteArray) {
+        if (pcm16.isEmpty()) return
+        synchronized(downlinkFrameLock) {
+            val merged = if (downlinkPcmCarry.isEmpty()) {
+                pcm16
+            } else {
+                ByteArray(downlinkPcmCarry.size + pcm16.size).also { buf ->
+                    System.arraycopy(downlinkPcmCarry, 0, buf, 0, downlinkPcmCarry.size)
+                    System.arraycopy(pcm16, 0, buf, downlinkPcmCarry.size, pcm16.size)
+                }
+            }
+            var offset = 0
+            while ((merged.size - offset) >= NRF_DOWNLINK_PCM_FRAME_BYTES) {
+                val frame = merged.copyOfRange(offset, offset + NRF_DOWNLINK_PCM_FRAME_BYTES)
+                encodeNrfDownlinkAdpcmFrame(frame)?.let { downlinkFrameQueue.addLast(it) }
+                offset += NRF_DOWNLINK_PCM_FRAME_BYTES
+            }
+            downlinkPcmCarry = if (offset < merged.size) {
+                merged.copyOfRange(offset, merged.size)
+            } else {
+                ByteArray(0)
+            }
+        }
+        ensureDownlinkStreamJob()
+    }
+
+    private fun enqueueDownlinkEos() {
+        synchronized(downlinkFrameLock) {
+            if (downlinkPcmCarry.isNotEmpty()) {
+                val padded = ByteArray(NRF_DOWNLINK_PCM_FRAME_BYTES)
+                System.arraycopy(downlinkPcmCarry, 0, padded, 0, downlinkPcmCarry.size)
+                encodeNrfDownlinkAdpcmFrame(padded)?.let { downlinkFrameQueue.addLast(it) }
+                downlinkPcmCarry = ByteArray(0)
+            }
+            downlinkGrpcEos = true
+        }
+        ensureDownlinkStreamJob()
+    }
+
+    private fun ensureDownlinkStreamJob() {
+        if (downlinkStreamJob?.isActive == true) return
+        downlinkStreamJob = scope.launch {
+            var seq = downlinkSeq
+            while (isActive) {
+                if (!downlinkBleStarted) {
+                    val queuedFrames = synchronized(downlinkFrameLock) { downlinkFrameQueue.size }
+                    val allowStart = synchronized(downlinkFrameLock) {
+                        queuedFrames >= NRF_DOWNLINK_START_FRAMES || (downlinkGrpcEos && queuedFrames > 0)
+                    }
+                    if (!allowStart) {
+                        delay(10L)
+                        continue
+                    }
+                    if (ledCharacteristic == null) {
+                        synchronized(downlinkFrameLock) {
+                            downlinkFrameQueue.clear()
+                            downlinkPcmCarry = ByteArray(0)
+                            downlinkGrpcEos = false
+                        }
+                        nrfPlaybackPending = false
+                        GrpcAudioClient.setSendPaused(false)
+                        break
+                    }
+                    nrfPlaybackPending = true
+                    nrfBufferFull = false
+                    nrfReady = false
+                    sendBleControl("APP_READY?")
+                    val ready = waitForNrfReady(3000L)
+                    if (!ready) {
+                        Timber.tag("GrpcAudioClient").w("BLE NRF_READY timeout (stream)")
+                        synchronized(downlinkFrameLock) {
+                            downlinkFrameQueue.clear()
+                            downlinkPcmCarry = ByteArray(0)
+                            downlinkGrpcEos = false
+                        }
+                        nrfPlaybackPending = false
+                        GrpcAudioClient.setSendPaused(false)
+                        break
+                    }
+                    Timber.tag("GrpcAudioClient").i("BLE APP_PLAY_START (stream)")
+                    sendBleControl("APP_PLAY_START")
+                    downlinkBleStarted = true
+                }
+
+                if (nrfBufferFull) {
+                    delay(4L)
+                    continue
+                }
+
+                val encoded = synchronized(downlinkFrameLock) {
+                    if (downlinkFrameQueue.isNotEmpty()) downlinkFrameQueue.removeFirst() else null
+                }
+                if (encoded != null) {
+                    sendBleAudioFrame(encoded, seq++)
+                    delay(NRF_DOWNLINK_FRAME_MS)
+                    continue
+                }
+
+                val eos = synchronized(downlinkFrameLock) { downlinkGrpcEos }
+                if (eos) {
+                    sendBleAudioEnd(seq++)
+                    Timber.tag("GrpcAudioClient").i("BLE APP_PLAY_END (stream)")
+                    downlinkSeq = seq
+                    downlinkBleStarted = false
+                    synchronized(downlinkFrameLock) {
+                        downlinkGrpcEos = false
+                    }
+                    break
+                }
+
+                delay(NRF_DOWNLINK_FRAME_MS)
+            }
+            downlinkStreamJob = null
+        }
+    }
+
+    private suspend fun sendBleAudioFrame(payload: ByteArray, seq: Int) {
+        // Current phone negotiates MTU 65 => max characteristic value length is 62 bytes.
+        // Our custom fragment header already takes 8 bytes, so audio payload per BLE write
+        // must stay within 54 bytes, otherwise Android silently truncates the first fragment.
+        val mtuPayload = 54
+        val fragCnt = ((payload.size + mtuPayload - 1) / mtuPayload).coerceAtLeast(1)
         var offset = 0
         for (frag in 0 until fragCnt) {
-            val remaining = pcm.size - offset
+            val remaining = payload.size - offset
             val chunk = minOf(remaining, mtuPayload)
             val pkt = ByteArray(8 + chunk)
             pkt[0] = 0xA5.toByte()
@@ -1525,7 +1772,7 @@ private class BlinkyManagerImpl(
             pkt[5] = fragCnt.toByte()
             pkt[6] = (chunk and 0xFF).toByte()
             pkt[7] = ((chunk shr 8) and 0xFF).toByte()
-            System.arraycopy(pcm, offset, pkt, 8, chunk)
+            System.arraycopy(payload, offset, pkt, 8, chunk)
             writeCharacteristic(
                 ledCharacteristic,
                 pkt,
@@ -1556,8 +1803,13 @@ private class BlinkyManagerImpl(
     private fun onNrfPlaybackDone() {
         nrfPlaybackPending = false
         nrfReady = false
+        downlinkBleStarted = false
         if (downlinkTestEnabled) {
             playDoneSignal.trySend(Unit)
+        }
+        if (nrfMicPaused) {
+            sendBleControl("APP_MIC_RESUME")
+            nrfMicPaused = false
         }
         if (_conversationState.value == ConversationState.WAITING_RESPONSE) {
             _conversationState.value = ConversationState.READY
@@ -1596,7 +1848,7 @@ private class BlinkyManagerImpl(
     }
 
     private suspend fun sendTestDownlink(pcm16: ByteArray) {
-        val frameBytes = (nrfSampleRateHz / 50) * (bitsPerSample / 8)
+        val frameBytes = NRF_DOWNLINK_PCM_FRAME_BYTES
         var offset = 0
         while (offset < pcm16.size) {
             val remaining = pcm16.size - offset
@@ -1611,7 +1863,8 @@ private class BlinkyManagerImpl(
             while (nrfBufferFull) {
                 delay(10L)
             }
-            sendBleAudioFrame(frame, downlinkSeq++)
+            val encoded = encodeNrfDownlinkAdpcmFrame(frame) ?: break
+            sendBleAudioFrame(encoded, downlinkSeq++)
             offset += take
         }
     }
@@ -1736,9 +1989,15 @@ private class BlinkyManagerImpl(
         playbackDraining = false
         playbackForceDrain = false
         nrfPlaybackPending = false
-        downlinkChunks.clear()
-        downlinkJob?.cancel()
-        downlinkJob = null
+        downlinkBleStarted = false
+        downlinkReplyActive = false
+        synchronized(downlinkFrameLock) {
+            downlinkFrameQueue.clear()
+            downlinkPcmCarry = ByteArray(0)
+            downlinkGrpcEos = false
+        }
+        downlinkStreamJob?.cancel()
+        downlinkStreamJob = null
         stopKeepalive()
         releaseAudioTrack()
     }
