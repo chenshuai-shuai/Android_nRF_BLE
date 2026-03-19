@@ -12,6 +12,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.os.SystemClock
 import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -53,6 +54,14 @@ private class BlinkyManagerImpl(
     context: Context,
     private val device: BluetoothDevice,
 ): BleManager(context), Blinky {
+    private data class DownlinkTiming(
+        val sid: Int,
+        var grpcFirstMs: Long = 0L,
+        var grpcCompleteMs: Long = 0L,
+        var blePlayStartMs: Long = 0L,
+        var blePlayEndMs: Long = 0L,
+        var nrfPlayDoneMs: Long = 0L
+    )
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(Dispatchers.IO)
     private val dataLogger = DataLogger(context)
@@ -149,6 +158,8 @@ private class BlinkyManagerImpl(
     private val downlinkTestEnabled = false
     private var downlinkTestJob: Job? = null
     private val playDoneSignal = Channel<Unit>(Channel.CONFLATED)
+    private var downlinkTimingSeq: Int = 0
+    private var downlinkTiming: DownlinkTiming? = null
     private val simulatedHalfDuplexLoopEnabled = false
     private val simulatedUplinkWindowMs = 10_000L
     private var simulatedUplinkAccumMs = 0L
@@ -198,6 +209,18 @@ private class BlinkyManagerImpl(
     private var recordingActive = false
     private val useSpeexDsp = true
     private val speexDsp = SpeexDspProcessor(sampleRate = 16000, frameSize = 160)
+
+    private fun logDownlinkTiming(tag: String) {
+        val t = downlinkTiming ?: return
+        val grpcMs = if (t.grpcFirstMs > 0L && t.grpcCompleteMs > 0L) t.grpcCompleteMs - t.grpcFirstMs else -1L
+        val bleTxMs = if (t.blePlayStartMs > 0L && t.blePlayEndMs > 0L) t.blePlayEndMs - t.blePlayStartMs else -1L
+        val totalMs = if (t.grpcFirstMs > 0L && t.nrfPlayDoneMs > 0L) t.nrfPlayDoneMs - t.grpcFirstMs else -1L
+        Timber.tag("GrpcAudioClient").i(
+            "DL_TIMING[%s] sid=%d grpc_first=%d grpc_done=%d ble_start=%d ble_end=%d play_done=%d grpc_ms=%d ble_tx_ms=%d total_ms=%d",
+            tag, t.sid, t.grpcFirstMs, t.grpcCompleteMs, t.blePlayStartMs, t.blePlayEndMs, t.nrfPlayDoneMs,
+            grpcMs, bleTxMs, totalMs
+        )
+    }
 
     private companion object {
         private const val UPLINK_MAGIC0 = 0xC3
@@ -702,6 +725,8 @@ private class BlinkyManagerImpl(
             }
             GrpcAudioClient.setSendPaused(true)
             if (useNrfSpeaker && !downlinkReplyActive) {
+                downlinkTimingSeq += 1
+                downlinkTiming = DownlinkTiming(sid = downlinkTimingSeq)
                 synchronized(downlinkFrameLock) {
                     downlinkFrameQueue.clear()
                     downlinkPcmCarry = ByteArray(0)
@@ -732,6 +757,10 @@ private class BlinkyManagerImpl(
                 startWaitingCountdown()
             }
             if (useNrfSpeaker) {
+                val now = SystemClock.elapsedRealtime()
+                if (downlinkTiming?.grpcFirstMs == 0L) {
+                    downlinkTiming?.grpcFirstMs = now
+                }
                 val pcm16 = resample24kTo16k(pcm)
                 enqueueDownlinkStream(pcm16)
             } else {
@@ -744,6 +773,8 @@ private class BlinkyManagerImpl(
                 startWaitingCountdown()
             }
             if (useNrfSpeaker) {
+                downlinkTiming?.grpcCompleteMs = SystemClock.elapsedRealtime()
+                logDownlinkTiming("grpc_complete")
                 downlinkReplyActive = false
                 enqueueDownlinkEos()
             } else {
@@ -1717,6 +1748,7 @@ private class BlinkyManagerImpl(
                         break
                     }
                     Timber.tag("GrpcAudioClient").i("BLE APP_PLAY_START (stream)")
+                    downlinkTiming?.blePlayStartMs = SystemClock.elapsedRealtime()
                     sendBleControl("APP_PLAY_START")
                     downlinkBleStarted = true
                 }
@@ -1738,7 +1770,9 @@ private class BlinkyManagerImpl(
                 val eos = synchronized(downlinkFrameLock) { downlinkGrpcEos }
                 if (eos) {
                     sendBleAudioEnd(seq++)
+                    downlinkTiming?.blePlayEndMs = SystemClock.elapsedRealtime()
                     Timber.tag("GrpcAudioClient").i("BLE APP_PLAY_END (stream)")
+                    logDownlinkTiming("ble_end")
                     downlinkSeq = seq
                     downlinkBleStarted = false
                     synchronized(downlinkFrameLock) {
@@ -1801,6 +1835,8 @@ private class BlinkyManagerImpl(
     }
 
     private fun onNrfPlaybackDone() {
+        downlinkTiming?.nrfPlayDoneMs = SystemClock.elapsedRealtime()
+        logDownlinkTiming("play_done")
         nrfPlaybackPending = false
         nrfReady = false
         downlinkBleStarted = false
