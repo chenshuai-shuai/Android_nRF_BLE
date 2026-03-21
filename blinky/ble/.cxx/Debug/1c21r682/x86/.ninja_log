@@ -13,3 +13,5 @@
 293	395	7951111055106398	CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/kiss_fftr.c.o	dcb9a24ede5f4ca3
 395	556	7951111056236058	libspeexdsp.a	d857c6f24c5cacaf
 557	712	7951111058246606	C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/build/intermediates/cxx/Debug/1c21r682/obj/x86/libspeex_jni.so	ef25b910d855c98c
+14	497	7956349784651183	CMakeFiles/speex_jni.dir/speex_jni.cpp.o	123c94dbc4c83e2d
+498	1248	7956349791453585	C:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/build/intermediates/cxx/Debug/1c21r682/obj/x86/libspeex_jni.so	ef25b910d855c98c

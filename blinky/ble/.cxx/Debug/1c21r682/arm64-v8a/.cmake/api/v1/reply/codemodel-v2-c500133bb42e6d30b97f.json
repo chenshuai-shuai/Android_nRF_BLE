@@ -41,14 +41,14 @@
 				{
 					"directoryIndex" : 0,
 					"id" : "speex_jni::@6890427a1f51a3e7e1df",
-					"jsonFile" : "target-speex_jni-Debug-484bec15170dfd89c687.json",
+					"jsonFile" : "target-speex_jni-Debug-09aa976d263aa73aa123.json",
 					"name" : "speex_jni",
 					"projectIndex" : 0
 				},
 				{
 					"directoryIndex" : 0,
 					"id" : "speexdsp::@6890427a1f51a3e7e1df",
-					"jsonFile" : "target-speexdsp-Debug-f5afd461e9cf567f2202.json",
+					"jsonFile" : "target-speexdsp-Debug-33e1ced0b4dbe1e19cef.json",
 					"name" : "speexdsp",
 					"projectIndex" : 0
 				}

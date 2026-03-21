@@ -9,6 +9,7 @@ add_library(
     speexdsp
     STATIC
     ${SPEEXDSP_SRC}/preprocess.c
+    ${SPEEXDSP_SRC}/resample.c
     ${SPEEXDSP_SRC}/mdf.c
     ${SPEEXDSP_SRC}/fftwrap.c
     ${SPEEXDSP_SRC}/filterbank.c
