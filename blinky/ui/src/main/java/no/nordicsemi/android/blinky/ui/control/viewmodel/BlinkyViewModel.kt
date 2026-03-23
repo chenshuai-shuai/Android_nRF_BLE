@@ -92,6 +92,9 @@ class BlinkyViewModel @Inject constructor(
     val conversationSessionReady = repository.conversationSessionReady
         .stateIn(viewModelScope, SharingStarted.Lazily, false)
 
+    val realtimeServiceEnabled = repository.realtimeServiceEnabled
+        .stateIn(viewModelScope, SharingStarted.Lazily, false)
+
     init {
         // In this sample we want to connect to the device as soon as the view model is created.
         connect()
@@ -169,6 +172,20 @@ class BlinkyViewModel @Inject constructor(
         val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
         viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
             repository.endConversation()
+        }
+    }
+
+    fun startRealtimeService() {
+        val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
+            repository.startRealtimeService()
+        }
+    }
+
+    fun stopRealtimeService() {
+        val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
+            repository.stopRealtimeService()
         }
     }
 

@@ -111,6 +111,8 @@ private class BlinkyManagerImpl(
     override val waitingResponseSeconds = _waitingResponseSeconds.asStateFlow()
     private val _conversationSessionReady = MutableStateFlow(false)
     override val conversationSessionReady = _conversationSessionReady.asStateFlow()
+    private val _realtimeServiceEnabled = MutableStateFlow(false)
+    override val realtimeServiceEnabled = _realtimeServiceEnabled.asStateFlow()
     private val _gpsData = MutableStateFlow<GpsData?>(null)
     override val gpsData = _gpsData.asStateFlow()
     private val _gpsState = MutableStateFlow(GpsState.UNAVAILABLE)
@@ -223,6 +225,8 @@ private class BlinkyManagerImpl(
     private var downlinkHpY1 = 0f
     private var downlinkLpY1 = 0f
     private var downlinkCompEnv = 0f
+    private var uplinkNoiseFloor = 300f
+    private var uplinkGainSmooth = 1.0f
 
     private fun logDownlinkTiming(tag: String) {
         val t = downlinkTiming ?: return
@@ -234,6 +238,18 @@ private class BlinkyManagerImpl(
             tag, t.sid, t.grpcFirstMs, t.grpcCompleteMs, t.blePlayStartMs, t.blePlayEndMs, t.nrfPlayDoneMs,
             grpcMs, bleTxMs, totalMs
         )
+    }
+
+    private fun autoResumeRealtimeUplink() {
+        if (!_realtimeServiceEnabled.value || sessionId == null || !_conversationSessionReady.value) {
+            return
+        }
+        _conversationState.value = ConversationState.TALKING
+        _waitingResponseSeconds.value = 0L
+        lastSpeechMs = System.currentTimeMillis()
+        GrpcAudioClient.setSendPaused(false)
+        updateKeepalive()
+        Timber.tag("GrpcAudioClient").i("Realtime service: uplink resumed")
     }
 
     private companion object {
@@ -717,6 +733,7 @@ private class BlinkyManagerImpl(
     override suspend fun startConversation() {
         if (downlinkTestEnabled) return
         if (_conversationState.value != ConversationState.IDLE) return
+        _realtimeServiceEnabled.value = true
         sessionId = "session_${System.currentTimeMillis()}"
         _conversationSessionId.value = sessionId
         _conversationSessionReady.value = false
@@ -765,9 +782,10 @@ private class BlinkyManagerImpl(
             _conversationSessionReady.value = true
             sessionDelayJob?.cancel()
             sessionDelayJob = null
-            if (pendingTalk) {
+            if (_realtimeServiceEnabled.value || pendingTalk) {
                 pendingTalk = false
                 _conversationState.value = ConversationState.TALKING
+                GrpcAudioClient.setSendPaused(false)
             } else {
                 _conversationState.value = ConversationState.READY
             }
@@ -809,12 +827,7 @@ private class BlinkyManagerImpl(
                         sendBleControl("APP_MIC_RESUME")
                         nrfMicPaused = false
                     }
-                    GrpcAudioClient.setSendPaused(false)
-                    if (_conversationState.value == ConversationState.WAITING_RESPONSE) {
-                        _conversationState.value = ConversationState.READY
-                        _waitingResponseSeconds.value = 0L
-                    }
-                    updateKeepalive()
+                    autoResumeRealtimeUplink()
                     return@setAudioCompleteListener
                 }
                 downlinkTiming?.grpcCompleteMs = SystemClock.elapsedRealtime()
@@ -835,9 +848,7 @@ private class BlinkyManagerImpl(
                     playbackAllowed = false
                     playbackForceDrain = false
                     if (_conversationState.value == ConversationState.WAITING_RESPONSE) {
-                        _conversationState.value = ConversationState.READY
-                        _waitingResponseSeconds.value = 0L
-                        updateKeepalive()
+                        autoResumeRealtimeUplink()
                     }
                 }
             }
@@ -846,7 +857,7 @@ private class BlinkyManagerImpl(
                 nrfMicPaused = false
             }
             if (!useNrfSpeaker) {
-                GrpcAudioClient.setSendPaused(false)
+                autoResumeRealtimeUplink()
             }
             updateKeepalive()
         }
@@ -885,48 +896,18 @@ private class BlinkyManagerImpl(
     override suspend fun startTalking() {
         if (downlinkTestEnabled) return
         requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH).enqueue()
-        val state = _conversationState.value
-        if (sessionId == null) {
-            startConversation()
-        }
-        if ((useNrfSpeaker && nrfPlaybackPending) || (!useNrfSpeaker && (playbackDraining || playbackQueuedBytes > 0))) {
-            return
-        }
-        if (_conversationSessionReady.value) {
-            _conversationState.value = ConversationState.TALKING
-            lastSpeechMs = System.currentTimeMillis()
-            GrpcAudioClient.setSendPaused(false)
-        } else {
-            pendingTalk = true
-        }
-        updateKeepalive()
-        if (!useBleMic) {
-            startMicCapture()
-        }
+        startRealtimeService()
     }
 
     override suspend fun stopTalking() {
         if (downlinkTestEnabled) return
-        if (_conversationState.value != ConversationState.TALKING) {
-            if (_conversationState.value == ConversationState.CONNECTING && pendingTalk) {
-                pendingTalk = false
-                endConversation()
-            }
-            return
-        }
-        if (!useBleMic) {
-            stopMicCapture()
-        }
-        lastSpeechMs = System.currentTimeMillis()
-        _conversationState.value = ConversationState.WAITING_RESPONSE
-        GrpcAudioClient.setSendPaused(true)
-        startWaitingCountdown()
-        updateKeepalive()
+        stopRealtimeService()
     }
 
     override suspend fun endConversation() {
         if (downlinkTestEnabled) return
         if (_conversationState.value == ConversationState.IDLE) return
+        _realtimeServiceEnabled.value = false
         stopMicCapture()
         if (nrfMicPaused) {
             sendBleControl("APP_MIC_RESUME")
@@ -968,6 +949,30 @@ private class BlinkyManagerImpl(
         }
         releaseAudioTrack()
         stopKeepalive()
+    }
+
+    override suspend fun startRealtimeService() {
+        if (downlinkTestEnabled) return
+        _realtimeServiceEnabled.value = true
+        requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH).enqueue()
+        if (sessionId == null || _conversationState.value == ConversationState.IDLE) {
+            startConversation()
+            return
+        }
+        if ((useNrfSpeaker && nrfPlaybackPending) ||
+            (!useNrfSpeaker && (playbackDraining || playbackQueuedBytes > 0))) {
+            return
+        }
+        if (_conversationSessionReady.value) {
+            autoResumeRealtimeUplink()
+        } else {
+            pendingTalk = true
+        }
+    }
+
+    override suspend fun stopRealtimeService() {
+        _realtimeServiceEnabled.value = false
+        endConversation()
     }
 
     private fun handleAudioPacket(bytes: ByteArray): Boolean {
@@ -1025,10 +1030,15 @@ private class BlinkyManagerImpl(
                     val decoded = decodeNrfAudioFrame(frameBytes)
                     if (decoded != null) {
                         maybeTriggerSimulatedDownlink(decoded.first, decoded.second)
-                        val processed = if (useSpeexDsp && decoded.second == 16000) {
+                        val processedBase = if (useSpeexDsp && decoded.second == 16000) {
                             speexDsp.processPcm16le(decoded.first)
                         } else {
                             decoded.first
+                        }
+                        val processed = if (decoded.second == 16000) {
+                            enhanceUplinkVoicePcm16le(processedBase)
+                        } else {
+                            processedBase
                         }
                         handleManualRecord(processed, decoded.second)
                         val payload = when (decoded.second) {
@@ -1160,6 +1170,72 @@ private class BlinkyManagerImpl(
             outSample++
         }
         return Pair(out, sampleRate)
+    }
+
+    private fun enhanceUplinkVoicePcm16le(pcm16: ByteArray): ByteArray {
+        if (pcm16.size < 2 || (pcm16.size and 1) != 0) return pcm16
+
+        val out = ByteArray(pcm16.size)
+        val samples = pcm16.size / 2
+        var peak = 0f
+        var sumSq = 0f
+
+        for (i in 0 until samples) {
+            val s = leI16(pcm16, i * 2).toFloat()
+            val a = kotlin.math.abs(s)
+            if (a > peak) peak = a
+            sumSq += s * s
+        }
+
+        if (samples == 0) return pcm16
+
+        val rms = kotlin.math.sqrt(sumSq / samples.toFloat())
+        val speechThreshold = kotlin.math.max(650f, uplinkNoiseFloor * 2.3f)
+        val speechLikely = peak >= 2200f || rms >= speechThreshold
+
+        uplinkNoiseFloor = if (speechLikely) {
+            uplinkNoiseFloor * 0.995f + rms * 0.005f
+        } else {
+            uplinkNoiseFloor * 0.94f + rms * 0.06f
+        }.coerceIn(180f, 2200f)
+
+        val targetRms = 9500f
+        val rawGain = if (speechLikely && rms > 1f) {
+            (targetRms / rms).coerceIn(1.15f, 4.2f)
+        } else {
+            1.0f
+        }
+
+        uplinkGainSmooth = if (rawGain > uplinkGainSmooth) {
+            uplinkGainSmooth * 0.80f + rawGain * 0.20f
+        } else {
+            uplinkGainSmooth * 0.92f + rawGain * 0.08f
+        }.coerceIn(1.0f, 4.2f)
+
+        val gain = uplinkGainSmooth
+        for (i in 0 until samples) {
+            val s = leI16(pcm16, i * 2).toFloat()
+            val a = kotlin.math.abs(s)
+            var y = if (speechLikely || a >= speechThreshold * 0.70f) {
+                s * gain
+            } else {
+                s * 0.92f
+            }
+
+            val ay = kotlin.math.abs(y)
+            if (ay > 18000f) {
+                val excess = ay - 18000f
+                val compressed = 18000f + excess * 0.35f
+                y = if (y >= 0f) compressed else -compressed
+            }
+            y = y.coerceIn(-30000f, 30000f)
+
+            val iv = y.toInt()
+            out[i * 2] = (iv and 0xFF).toByte()
+            out[i * 2 + 1] = ((iv shr 8) and 0xFF).toByte()
+        }
+
+        return out
     }
 
     private fun encodeNrfDownlinkAdpcmFrame(pcm16: ByteArray): ByteArray? {
@@ -2048,11 +2124,11 @@ private class BlinkyManagerImpl(
             nrfMicPaused = false
         }
         if (_conversationState.value == ConversationState.WAITING_RESPONSE) {
-            _conversationState.value = ConversationState.READY
-            _waitingResponseSeconds.value = 0L
-            updateKeepalive()
+            autoResumeRealtimeUplink()
         }
-        GrpcAudioClient.setSendPaused(false)
+        if (_realtimeServiceEnabled.value) {
+            GrpcAudioClient.setSendPaused(false)
+        }
     }
 
     private fun startDownlinkTest() {
@@ -2244,9 +2320,10 @@ private class BlinkyManagerImpl(
             delay(initialSessionDelayMs)
             if (_conversationState.value == ConversationState.CONNECTING && !_conversationSessionReady.value) {
                 _conversationSessionReady.value = true
-                if (pendingTalk) {
+                if (_realtimeServiceEnabled.value || pendingTalk) {
                     pendingTalk = false
                     _conversationState.value = ConversationState.TALKING
+                    GrpcAudioClient.setSendPaused(false)
                 } else {
                     _conversationState.value = ConversationState.READY
                 }
@@ -2379,9 +2456,7 @@ private class BlinkyManagerImpl(
                         playbackAllowed = false
                         playbackForceDrain = false
                         if (_conversationState.value == ConversationState.WAITING_RESPONSE) {
-                            _conversationState.value = ConversationState.READY
-                            _waitingResponseSeconds.value = 0L
-                            updateKeepalive()
+                            autoResumeRealtimeUplink()
                         }
                     }
                 }

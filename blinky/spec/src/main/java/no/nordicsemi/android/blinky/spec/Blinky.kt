@@ -101,6 +101,11 @@ interface Blinky {
     val conversationSessionReady: StateFlow<Boolean>
 
     /**
+     * Whether the automatic realtime conversation service is enabled.
+     */
+    val realtimeServiceEnabled: StateFlow<Boolean>
+
+    /**
      * Controls the LED state.
      *
      * @param state the new state of the LED.
@@ -130,6 +135,11 @@ interface Blinky {
     suspend fun startConversation()
 
     /**
+     * Start automatic realtime conversation service.
+     */
+    suspend fun startRealtimeService()
+
+    /**
      * Begin sending microphone audio to the active session.
      */
     suspend fun startTalking()
@@ -143,4 +153,9 @@ interface Blinky {
      * End the current conversation session and close gRPC.
      */
     suspend fun endConversation()
+
+    /**
+     * Stop automatic realtime conversation service.
+     */
+    suspend fun stopRealtimeService()
 }

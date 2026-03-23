@@ -4,6 +4,7 @@ import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Button
@@ -23,8 +24,6 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
-import androidx.compose.ui.ExperimentalComposeUiApi
-import androidx.compose.ui.input.pointer.pointerInteropFilter
 import no.nordicsemi.android.blinky.spec.Blinky
 import no.nordicsemi.android.blinky.spec.ConversationState
 import no.nordicsemi.android.blinky.ui.R
@@ -36,10 +35,11 @@ import no.nordicsemi.android.scanner.view.DeviceConnectingView
 import no.nordicsemi.android.scanner.view.DeviceDisconnectedView
 import no.nordicsemi.android.scanner.view.Reason
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun BlinkyScreen(
     onNavigateUp: () -> Unit,
+    onOpenRuntimeLog: () -> Unit,
 ) {
     val viewModel: BlinkyViewModel = hiltViewModel()
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -87,6 +87,7 @@ internal fun BlinkyScreen(
                     val sessionId by viewModel.conversationSessionId.collectAsStateWithLifecycle()
                     val waitingSeconds by viewModel.waitingResponseSeconds.collectAsStateWithLifecycle()
                     val sessionReady by viewModel.conversationSessionReady.collectAsStateWithLifecycle()
+                    val realtimeServiceEnabled by viewModel.realtimeServiceEnabled.collectAsStateWithLifecycle()
                     val ppgMessages = rxMessages.filter { it.startsWith("PPG ") }
                     val imuMessages = rxMessages.filter {
                         it.startsWith("IMU ") || it.startsWith("IMU_RAW ")
@@ -128,52 +129,35 @@ internal fun BlinkyScreen(
                             Text(text = "Session: $sessionId")
                         }
                         Text(text = "Session Ready: ${if (sessionReady) "YES" else "NO"}")
+                        Text(text = "Realtime Service: ${if (realtimeServiceEnabled) "ON" else "OFF"}")
                         if (conversationState == ConversationState.WAITING_RESPONSE) {
                             Text(text = "Waiting reply: ${waitingSeconds}s")
                         }
                         Spacer(modifier = Modifier.height(8.dp))
-                        val canTalk = conversationState == ConversationState.READY ||
-                            conversationState == ConversationState.IDLE ||
-                            conversationState == ConversationState.CONNECTING
-                        val waiting = conversationState == ConversationState.WAITING_RESPONSE
-                        val isTalking = conversationState == ConversationState.TALKING
-                        val buttonLabel = when {
-                            waiting -> "Waiting for reply..."
-                            isTalking -> "Release to send"
-                            conversationState == ConversationState.CONNECTING -> "Starting session..."
-                            else -> "Hold to talk"
-                        }
-                        Button(
-                            onClick = {},
-                            enabled = canTalk,
-                            modifier = Modifier
-                                .padding(bottom = 8.dp)
-                                .pointerInteropFilter { event ->
-                                    if (!canTalk) return@pointerInteropFilter true
-                                    when (event.action) {
-                                        android.view.MotionEvent.ACTION_DOWN -> {
-                                            viewModel.startConversation()
-                                            viewModel.startTalking()
-                                        }
-                                        android.view.MotionEvent.ACTION_UP,
-                                        android.view.MotionEvent.ACTION_CANCEL -> {
-                                            if (conversationState == ConversationState.TALKING) {
-                                                viewModel.stopTalking()
-                                            }
-                                        }
+                        Row(modifier = Modifier.padding(bottom = 8.dp)) {
+                            Button(
+                                onClick = {
+                                    if (realtimeServiceEnabled) {
+                                        viewModel.stopRealtimeService()
+                                    } else {
+                                        viewModel.startRealtimeService()
                                     }
-                                    true
-                                }
-                        ) {
-                            Text(text = buttonLabel)
+                                },
+                                enabled = conversationState != ConversationState.CONNECTING
+                            ) {
+                                Text(
+                                    text = if (realtimeServiceEnabled) {
+                                        "Stop Realtime Service"
+                                    } else {
+                                        "Start Realtime Service"
+                                    }
+                                )
+                            }
                         }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Button(
-                            onClick = { viewModel.endConversation() },
-                            enabled = conversationState != ConversationState.IDLE,
-                            modifier = Modifier.padding(bottom = 8.dp)
-                        ) {
-                            Text(text = "End Session")
+                        Row(modifier = Modifier.padding(bottom = 8.dp)) {
+                            Button(onClick = onOpenRuntimeLog) {
+                                Text(text = "Open Runtime Log")
+                            }
                         }
 
                         Text(text = "gRPC Status: $grpcState")

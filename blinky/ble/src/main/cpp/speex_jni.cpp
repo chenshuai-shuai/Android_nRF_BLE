@@ -27,22 +27,22 @@ Java_no_nordicsemi_android_blinky_ble_SpeexDspProcessor_nativeCreate(
     int denoise = 1;
     speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_DENOISE, &denoise);
 
-    int noiseSuppress = -12; // dB (lighter to keep clarity)
+    int noiseSuppress = -20; // dB
     speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &noiseSuppress);
 
     int agc = 1;
     speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC, &agc);
 
-    float agcLevel = 12000.0f;
+    float agcLevel = 20000.0f;
     speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_LEVEL, &agcLevel);
 
-    int agcMaxGain = 26; // dB
+    int agcMaxGain = 36; // dB
     speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_MAX_GAIN, &agcMaxGain);
 
-    int inc = 12; // dB/s
+    int inc = 18; // dB/s
     speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_INCREMENT, &inc);
 
-    int dec = 12; // dB/s
+    int dec = 14; // dB/s
     speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_DECREMENT, &dec);
 
     int dereverb = 0;

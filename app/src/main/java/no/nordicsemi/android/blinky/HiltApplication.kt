@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import dagger.hilt.android.HiltAndroidApp
 import no.nordicsemi.android.blinky.ble.GrpcAudioClient
+import no.nordicsemi.android.blinky.ble.logging.GrpcAudioClientLogTree
 import timber.log.Timber
 
 @HiltAndroidApp
@@ -14,6 +15,7 @@ class HiltApplication : Application() {
 
         // Initialize Timber. By default, the library will log to the Android logcat.
         Timber.plant(Timber.DebugTree())
+        Timber.plant(GrpcAudioClientLogTree())
 
         // Configure gRPC audio defaults. Session starts on push-to-talk.
         Log.i("BlinkyApp", "HiltApplication onCreate: configuring gRPC client")

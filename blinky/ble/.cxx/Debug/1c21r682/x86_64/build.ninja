@@ -57,6 +57,14 @@ build CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BL
   OBJECT_DIR = CMakeFiles\speexdsp.dir
   OBJECT_FILE_DIR = CMakeFiles\speexdsp.dir\C_\Users\Administrator\nrf52840_BLE\Android_nRF_BLE\third_party\speexdsp\libspeexdsp
 
+build CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/resample.c.o: C_COMPILER__speexdsp_Debug C$:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/resample.c || cmake_object_order_depends_target_speexdsp
+  DEFINES = -DEXPORT="" -DFLOATING_POINT -DUSE_KISS_FFT
+  DEP_FILE = CMakeFiles\speexdsp.dir\C_\Users\Administrator\nrf52840_BLE\Android_nRF_BLE\third_party\speexdsp\libspeexdsp\resample.c.o.d
+  FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC
+  INCLUDES = -IC:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/src/main/cpp/../../../../../third_party/speexdsp/include -IC:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/blinky/ble/src/main/cpp/../../../../../third_party/speexdsp/libspeexdsp
+  OBJECT_DIR = CMakeFiles\speexdsp.dir
+  OBJECT_FILE_DIR = CMakeFiles\speexdsp.dir\C_\Users\Administrator\nrf52840_BLE\Android_nRF_BLE\third_party\speexdsp\libspeexdsp
+
 build CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/mdf.c.o: C_COMPILER__speexdsp_Debug C$:/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/mdf.c || cmake_object_order_depends_target_speexdsp
   DEFINES = -DEXPORT="" -DFLOATING_POINT -DUSE_KISS_FFT
   DEP_FILE = CMakeFiles\speexdsp.dir\C_\Users\Administrator\nrf52840_BLE\Android_nRF_BLE\third_party\speexdsp\libspeexdsp\mdf.c.o.d
@@ -105,7 +113,7 @@ build CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BL
 #############################################
 # Link the static library libspeexdsp.a
 
-build libspeexdsp.a: C_STATIC_LIBRARY_LINKER__speexdsp_Debug CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/preprocess.c.o CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/mdf.c.o CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/fftwrap.c.o CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/filterbank.c.o CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/kiss_fft.c.o CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/kiss_fftr.c.o
+build libspeexdsp.a: C_STATIC_LIBRARY_LINKER__speexdsp_Debug CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/preprocess.c.o CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/resample.c.o CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/mdf.c.o CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/fftwrap.c.o CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/filterbank.c.o CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/kiss_fft.c.o CMakeFiles/speexdsp.dir/C_/Users/Administrator/nrf52840_BLE/Android_nRF_BLE/third_party/speexdsp/libspeexdsp/kiss_fftr.c.o
   LANGUAGE_COMPILE_FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info
   OBJECT_DIR = CMakeFiles\speexdsp.dir
   POST_BUILD = cd .

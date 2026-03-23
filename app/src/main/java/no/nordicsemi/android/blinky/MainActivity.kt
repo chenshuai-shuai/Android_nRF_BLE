@@ -5,6 +5,7 @@ import androidx.activity.compose.setContent
 import dagger.hilt.android.AndroidEntryPoint
 import no.nordicsemi.android.blinky.ui.conversation.ConversationDestination
 import no.nordicsemi.android.blinky.ui.control.BlinkyDestination
+import no.nordicsemi.android.blinky.ui.log.GrpcRuntimeLogDestination
 import no.nordicsemi.android.blinky.ui.scanner.ScannerDestination
 import no.nordicsemi.android.common.navigation.NavigationView
 import no.nordicsemi.android.common.theme.NordicActivity
@@ -18,7 +19,12 @@ class MainActivity: NordicActivity() {
 
         setContent {
             NordicTheme {
-                NavigationView(ScannerDestination + BlinkyDestination + ConversationDestination)
+                NavigationView(
+                    ScannerDestination +
+                        BlinkyDestination +
+                        ConversationDestination +
+                        GrpcRuntimeLogDestination
+                )
             }
         }
     }

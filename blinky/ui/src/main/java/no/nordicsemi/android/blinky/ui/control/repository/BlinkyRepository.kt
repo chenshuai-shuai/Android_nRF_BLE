@@ -96,6 +96,9 @@ class BlinkyRepository @Inject constructor(
     override val conversationSessionReady: StateFlow<Boolean>
         get() = blinky.conversationSessionReady
 
+    override val realtimeServiceEnabled: StateFlow<Boolean>
+        get() = blinky.realtimeServiceEnabled
+
     override fun release() {
         Timber.uproot(tree)
         blinky.release()
@@ -115,5 +118,13 @@ class BlinkyRepository @Inject constructor(
 
     override suspend fun endConversation() {
         blinky.endConversation()
+    }
+
+    override suspend fun startRealtimeService() {
+        blinky.startRealtimeService()
+    }
+
+    override suspend fun stopRealtimeService() {
+        blinky.stopRealtimeService()
     }
 }
