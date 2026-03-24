@@ -2,7 +2,8 @@ package no.nordicsemi.android.blinky.ble
 
 class SpeexDspProcessor(
     private val sampleRate: Int,
-    private val frameSize: Int
+    private val frameSize: Int,
+    private val profile: Int = PROFILE_UPLINK
 ) {
     private val handle: Long
     private val frameBuf = ShortArray(frameSize)
@@ -10,11 +11,16 @@ class SpeexDspProcessor(
 
     init {
         System.loadLibrary("speex_jni")
-        handle = nativeCreate(sampleRate, frameSize)
+        handle = nativeCreate(sampleRate, frameSize, profile)
     }
 
     fun close() {
         nativeDestroy(handle)
+    }
+
+    fun reset() {
+        pending = 0
+        nativeReset(handle)
     }
 
     fun processPcm16le(pcm: ByteArray): ByteArray {
@@ -61,7 +67,13 @@ class SpeexDspProcessor(
         return out
     }
 
-    private external fun nativeCreate(sampleRate: Int, frameSize: Int): Long
+    private external fun nativeCreate(sampleRate: Int, frameSize: Int, profile: Int): Long
     private external fun nativeDestroy(handle: Long)
+    private external fun nativeReset(handle: Long)
     private external fun nativeProcess(handle: Long, frame: ShortArray)
+
+    companion object {
+        const val PROFILE_UPLINK = 0
+        const val PROFILE_DOWNLINK = 1
+    }
 }

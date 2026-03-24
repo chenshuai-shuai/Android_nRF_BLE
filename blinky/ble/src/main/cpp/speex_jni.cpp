@@ -6,6 +6,8 @@
 struct SpeexStateHolder {
     SpeexPreprocessState *st;
     int frame_size;
+    int sample_rate;
+    int profile;
 };
 
 struct SpeexResamplerHolder {
@@ -13,44 +15,67 @@ struct SpeexResamplerHolder {
     int channels;
 };
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_no_nordicsemi_android_blinky_ble_SpeexDspProcessor_nativeCreate(
-        JNIEnv *env, jobject /*thiz*/, jint sampleRate, jint frameSize) {
-    if (frameSize <= 0 || sampleRate <= 0) {
-        return 0;
-    }
-    SpeexPreprocessState *st = speex_preprocess_state_init(frameSize, sampleRate);
+static SpeexPreprocessState *create_preprocess_state(int sample_rate, int frame_size, int profile)
+{
+    SpeexPreprocessState *st = speex_preprocess_state_init(frame_size, sample_rate);
     if (!st) {
-        return 0;
+        return nullptr;
     }
 
     int denoise = 1;
     speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_DENOISE, &denoise);
 
-    int noiseSuppress = -20; // dB
-    speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &noiseSuppress);
-
-    int agc = 1;
-    speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC, &agc);
-
-    float agcLevel = 20000.0f;
-    speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_LEVEL, &agcLevel);
-
-    int agcMaxGain = 36; // dB
-    speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_MAX_GAIN, &agcMaxGain);
-
-    int inc = 18; // dB/s
-    speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_INCREMENT, &inc);
-
-    int dec = 14; // dB/s
-    speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_DECREMENT, &dec);
+    int vad = 0;
+    speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_VAD, &vad);
 
     int dereverb = 0;
     speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_DEREVERB, &dereverb);
 
+    if (profile == 1) {
+        int noiseSuppress = -32;
+        speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &noiseSuppress);
+
+        int agc = 0;
+        speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC, &agc);
+    } else {
+        int noiseSuppress = -20;
+        speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &noiseSuppress);
+
+        int agc = 1;
+        speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC, &agc);
+
+        float agcLevel = 20000.0f;
+        speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_LEVEL, &agcLevel);
+
+        int agcMaxGain = 36;
+        speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_MAX_GAIN, &agcMaxGain);
+
+        int inc = 18;
+        speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_INCREMENT, &inc);
+
+        int dec = 14;
+        speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_DECREMENT, &dec);
+    }
+
+    return st;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_no_nordicsemi_android_blinky_ble_SpeexDspProcessor_nativeCreate(
+        JNIEnv *env, jobject /*thiz*/, jint sampleRate, jint frameSize, jint profile) {
+    if (frameSize <= 0 || sampleRate <= 0) {
+        return 0;
+    }
+    SpeexPreprocessState *st = create_preprocess_state(sampleRate, frameSize, profile);
+    if (!st) {
+        return 0;
+    }
+
     auto *holder = new SpeexStateHolder();
     holder->st = st;
     holder->frame_size = frameSize;
+    holder->sample_rate = sampleRate;
+    holder->profile = profile;
     return reinterpret_cast<jlong>(holder);
 }
 
@@ -79,6 +104,18 @@ Java_no_nordicsemi_android_blinky_ble_SpeexDspProcessor_nativeProcess(
     if (!buf) return;
     speex_preprocess_run(holder->st, reinterpret_cast<spx_int16_t *>(buf));
     env->ReleaseShortArrayElements(frame, buf, 0);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_no_nordicsemi_android_blinky_ble_SpeexDspProcessor_nativeReset(
+        JNIEnv *env, jobject /*thiz*/, jlong handle) {
+    if (handle == 0) return;
+    auto *holder = reinterpret_cast<SpeexStateHolder *>(handle);
+    if (holder->st) {
+        speex_preprocess_state_destroy(holder->st);
+        holder->st = nullptr;
+    }
+    holder->st = create_preprocess_state(holder->sample_rate, holder->frame_size, holder->profile);
 }
 
 extern "C" JNIEXPORT jlong JNICALL

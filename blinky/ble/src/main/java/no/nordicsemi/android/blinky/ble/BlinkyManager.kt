@@ -144,6 +144,7 @@ private class BlinkyManagerImpl(
     @Volatile private var playbackForceDrain: Boolean = false
     private var downlinkSeq: Int = 1
     private var downlinkStreamJob: Job? = null
+    private var downlinkPlayDoneTimeoutJob: Job? = null
     private val downlinkFrameLock = Any()
     private val downlinkFrameQueue: ArrayDeque<ByteArray> = ArrayDeque()
     private var downlinkPcmCarry = ByteArray(0)
@@ -157,6 +158,7 @@ private class BlinkyManagerImpl(
     @Volatile private var downlinkReplyActive: Boolean = false
     private var downlinkAdaptiveStartFrames: Int = 40
     private var downlinkGrpcChunkCount: Int = 0
+    private var downlinkAdpcmIndex: Int = 0
     private var downlinkGrpcFirstChunkMs: Long = 0L
     private var downlinkGrpcLastChunkMs: Long = 0L
     private var downlinkGrpcAudioMs: Long = 0L
@@ -166,6 +168,7 @@ private class BlinkyManagerImpl(
     @Volatile private var nrfBufferFull: Boolean = false
     @Volatile private var nrfReady: Boolean = false
     private val downlinkTestEnabled = false
+    private val nrfSpeakerPreferBufferedPlayback = true
     private var downlinkTestJob: Job? = null
     private val playDoneSignal = Channel<Unit>(Channel.CONFLATED)
     private var downlinkTimingSeq: Int = 0
@@ -219,8 +222,17 @@ private class BlinkyManagerImpl(
     private var recordBuffer = ByteArrayOutputStream()
     private var recordingActive = false
     private val useSpeexDsp = true
-    private val speexDsp = SpeexDspProcessor(sampleRate = 16000, frameSize = 160)
-    private val downlinkResampler = SpeexResampler(inputRate = 24000, outputRate = 8000, channels = 1, quality = 4)
+    private val speexDsp = SpeexDspProcessor(
+        sampleRate = 16000,
+        frameSize = 160,
+        profile = SpeexDspProcessor.PROFILE_UPLINK
+    )
+    private val downlinkSpeexDsp = SpeexDspProcessor(
+        sampleRate = 16000,
+        frameSize = 160,
+        profile = SpeexDspProcessor.PROFILE_DOWNLINK
+    )
+    private val downlinkResampler = SpeexResampler(inputRate = 24000, outputRate = 16000, channels = 1, quality = 8)
     private var downlinkHpX1 = 0f
     private var downlinkHpY1 = 0f
     private var downlinkLpY1 = 0f
@@ -260,7 +272,8 @@ private class BlinkyManagerImpl(
         private const val AUDIO_CODEC_PCM16_LE = 1
         private const val AUDIO_CODEC_IMA_ADPCM_8K = 2
         private const val AUDIO_CODEC_HDR_LEN = 8
-        private const val NRF_DOWNLINK_PCM_FRAME_SAMPLES = 80
+        private const val NRF_DOWNLINK_USE_PCM16 = false
+        private const val NRF_DOWNLINK_PCM_FRAME_SAMPLES = 160
         private const val NRF_DOWNLINK_PCM_FRAME_BYTES = NRF_DOWNLINK_PCM_FRAME_SAMPLES * 2
         private const val NRF_DOWNLINK_START_FRAMES = 12
         private const val NRF_DOWNLINK_START_FRAMES_NORMAL = 48
@@ -484,6 +497,7 @@ private class BlinkyManagerImpl(
         downlinkTestJob?.cancel()
         downlinkTestJob = null
         speexDsp.close()
+        downlinkSpeexDsp.close()
         downlinkResampler.close()
         GrpcSensorClient.stop()
         stopGpsUpdates()
@@ -761,19 +775,24 @@ private class BlinkyManagerImpl(
                 nrfMicPaused = true
             }
             GrpcAudioClient.setSendPaused(true)
-            if (useNrfSpeaker && !downlinkReplyActive) {
+            if (useNrfSpeaker) {
                 downlinkTimingSeq += 1
                 downlinkTiming = DownlinkTiming(sid = downlinkTimingSeq)
+                downlinkPlayDoneTimeoutJob?.cancel()
+                downlinkPlayDoneTimeoutJob = null
                 synchronized(downlinkFrameLock) {
                     downlinkFrameQueue.clear()
                     downlinkPcmCarry = ByteArray(0)
                     downlinkGrpcEos = false
                 }
-                downlinkTiming = null
                 downlinkAudioSeen = false
+                nrfBufferFull = false
+                nrfReady = false
+                nrfPlaybackPending = false
+                downlinkBleStarted = false
+                downlinkSpeexDsp.reset()
                 resetDownlinkSpeechPipeline()
                 resetDownlinkReplyBuffer()
-                downlinkBleStarted = false
                 downlinkReplyActive = true
             }
             updateKeepalive()
@@ -804,7 +823,7 @@ private class BlinkyManagerImpl(
                     downlinkTiming?.grpcFirstMs = now
                 }
                 updateDownlinkIngressStats(now, pcm)
-                val pcm16 = prepareDownlinkPcm8k(pcm)
+                val pcm16 = prepareDownlinkPcm16k(pcm)
                 enqueueDownlinkStream(pcm16)
             } else {
                 enqueueAudio(pcm)
@@ -929,6 +948,8 @@ private class BlinkyManagerImpl(
         playbackAllowed = false
         playbackDraining = false
         playbackForceDrain = false
+        downlinkPlayDoneTimeoutJob?.cancel()
+        downlinkPlayDoneTimeoutJob = null
         if (downlinkStreamJob?.isActive == true || nrfPlaybackPending) {
             Timber.tag("GrpcAudioClient").w("gRPC error during NRF downlink; keep BLE send in progress")
         } else {
@@ -1260,17 +1281,18 @@ private class BlinkyManagerImpl(
         )
 
         var predictor = leI16(pcm16, 0)
-        var index = 0
+        val initialIndex = downlinkAdpcmIndex.coerceIn(0, 88)
+        var index = initialIndex
         val nibbleCount = sampleCount - 1
         val dataBytes = (nibbleCount + 1) / 2
         val out = ByteArray(AUDIO_CODEC_HDR_LEN + dataBytes)
         out[0] = AUDIO_CODEC_IMA_ADPCM_8K.toByte()
-        out[1] = 8
+        out[1] = 16
         out[2] = 1
         out[3] = 4
         out[4] = (predictor and 0xFF).toByte()
         out[5] = ((predictor shr 8) and 0xFF).toByte()
-        out[6] = 0
+        out[6] = initialIndex.toByte()
         out[7] = sampleCount.toByte()
 
         var outOff = AUDIO_CODEC_HDR_LEN
@@ -1320,7 +1342,7 @@ private class BlinkyManagerImpl(
         if (!lowNibble) {
             out[outOff++] = packed.toByte()
         }
-        out[6] = index.toByte()
+        downlinkAdpcmIndex = index
         return if (outOff == out.size) out else out.copyOf(outOff)
     }
 
@@ -1352,6 +1374,24 @@ private class BlinkyManagerImpl(
             i += 2
         }
         return out
+    }
+
+    private fun encodeNrfDownlinkPcm16Frame(pcm16: ByteArray): ByteArray? {
+        if (pcm16.isEmpty() || (pcm16.size and 1) != 0) return null
+        val sampleCount = pcm16.size / 2
+        if (sampleCount == 0 || sampleCount > NRF_DOWNLINK_PCM_FRAME_SAMPLES) return null
+        val out = ByteArray(1 + pcm16.size)
+        out[0] = AUDIO_CODEC_PCM16_LE.toByte()
+        System.arraycopy(pcm16, 0, out, 1, pcm16.size)
+        return out
+    }
+
+    private fun encodeNrfDownlinkFrame(pcm16: ByteArray): ByteArray? {
+        return if (useNrfSpeaker && NRF_DOWNLINK_USE_PCM16) {
+            encodeNrfDownlinkPcm16Frame(pcm16)
+        } else {
+            encodeNrfDownlinkAdpcmFrame(pcm16)
+        }
     }
 
     private fun pcmStats(pcm16: ByteArray): Pair<Int, Int> {
@@ -1644,13 +1684,15 @@ private class BlinkyManagerImpl(
 
     private fun resetDownlinkSpeechPipeline() {
         downlinkResampler.reset()
+        downlinkAdpcmIndex = 0
         downlinkHpX1 = 0f
         downlinkHpY1 = 0f
         downlinkLpY1 = 0f
         downlinkCompEnv = 0f
         downlinkJitterMode = false
-        downlinkStrictBufferedMode = false
-        downlinkAdaptiveStartFrames = NRF_DOWNLINK_START_FRAMES_NORMAL
+        downlinkStrictBufferedMode = useNrfSpeaker && nrfSpeakerPreferBufferedPlayback
+        downlinkAdaptiveStartFrames =
+            if (downlinkStrictBufferedMode) NRF_DOWNLINK_START_FRAMES_SLOW else NRF_DOWNLINK_START_FRAMES_NORMAL
         downlinkGrpcChunkCount = 0
         downlinkGrpcFirstChunkMs = 0L
         downlinkGrpcLastChunkMs = 0L
@@ -1678,6 +1720,12 @@ private class BlinkyManagerImpl(
         }
 
         if (downlinkBleStarted) {
+            return
+        }
+
+        if (useNrfSpeaker && nrfSpeakerPreferBufferedPlayback) {
+            downlinkStrictBufferedMode = true
+            downlinkAdaptiveStartFrames = NRF_DOWNLINK_START_FRAMES_SLOW
             return
         }
 
@@ -1724,42 +1772,42 @@ private class BlinkyManagerImpl(
         }
     }
 
-    private fun prepareDownlinkPcm8k(pcm24: ByteArray): ByteArray {
-        val pcm8 = downlinkResampler.resamplePcm16le(pcm24)
-        if (pcm8.isEmpty()) return pcm8
-        return shapeDownlinkSpeech8k(pcm8)
+    private fun prepareDownlinkPcm16k(pcm24: ByteArray): ByteArray {
+        val pcm16 = downlinkResampler.resamplePcm16le(pcm24)
+        if (pcm16.isEmpty()) return pcm16
+        return pcm16
     }
 
-    private fun shapeDownlinkSpeech8k(pcm8: ByteArray): ByteArray {
-        if (pcm8.size < 2) return pcm8
-        val out = ByteArray(pcm8.size)
+    private fun shapeDownlinkSpeech16k(pcm16: ByteArray): ByteArray {
+        if (pcm16.size < 2) return pcm16
+        val out = ByteArray(pcm16.size)
         var off = 0
-        while (off + 1 < pcm8.size) {
-            val lo = pcm8[off].toInt() and 0xFF
-            val hi = pcm8[off + 1].toInt()
+        while (off + 1 < pcm16.size) {
+            val lo = pcm16[off].toInt() and 0xFF
+            val hi = pcm16[off + 1].toInt()
             var x = ((hi shl 8) or lo).toShort().toInt() / 32768.0f
 
-            val hp = x - downlinkHpX1 + 0.985f * downlinkHpY1
+            val hp = x - downlinkHpX1 + 0.986f * downlinkHpY1
             downlinkHpX1 = x
             downlinkHpY1 = hp
 
-            downlinkLpY1 += 0.86f * (hp - downlinkLpY1)
-            var y = downlinkLpY1
+            downlinkLpY1 += 0.18f * (x - downlinkLpY1)
+            var y = 0.92f * hp + 0.08f * downlinkLpY1
 
             val ay = kotlin.math.abs(y)
-            val envCoeff = if (ay > downlinkCompEnv) 0.20f else 0.012f
+            val envCoeff = if (ay > downlinkCompEnv) 0.12f else 0.006f
             downlinkCompEnv += envCoeff * (ay - downlinkCompEnv)
-            if (downlinkCompEnv > 0.34f) {
-                val over = downlinkCompEnv - 0.34f
-                val compressed = 0.34f + over / 2.4f
+            if (downlinkCompEnv > 0.55f) {
+                val over = downlinkCompEnv - 0.55f
+                val compressed = 0.55f + over / 2.6f
                 y *= compressed / (downlinkCompEnv + 1.0e-6f)
             }
 
-            y *= 1.10f
+            y *= 1.08f
             y = when {
-                y > 1.0f -> 0.92f
-                y < -1.0f -> -0.92f
-                else -> y - 0.16f * y * y * y
+                y > 0.92f -> 0.92f + (y - 0.92f) * 0.18f
+                y < -0.92f -> -0.92f + (y + 0.92f) * 0.18f
+                else -> y
             }
 
             val s = (y * 32767.0f).toInt().coerceIn(-32768, 32767)
@@ -1848,7 +1896,7 @@ private class BlinkyManagerImpl(
             return
         }
 
-        val pcm16 = prepareDownlinkPcm8k(pcm24)
+        val pcm16 = prepareDownlinkPcm16k(pcm24)
         if (pcm16.isEmpty()) {
             synchronized(downlinkFrameLock) {
                 downlinkGrpcEos = true
@@ -1869,13 +1917,13 @@ private class BlinkyManagerImpl(
             var offset = 0
             while ((merged.size - offset) >= NRF_DOWNLINK_PCM_FRAME_BYTES) {
                 val frame = merged.copyOfRange(offset, offset + NRF_DOWNLINK_PCM_FRAME_BYTES)
-                encodeNrfDownlinkAdpcmFrame(frame)?.let { downlinkFrameQueue.addLast(it) }
+                encodeNrfDownlinkFrame(frame)?.let { downlinkFrameQueue.addLast(it) }
                 offset += NRF_DOWNLINK_PCM_FRAME_BYTES
             }
             if (offset < merged.size) {
                 val padded = ByteArray(NRF_DOWNLINK_PCM_FRAME_BYTES)
                 System.arraycopy(merged, offset, padded, 0, merged.size - offset)
-                encodeNrfDownlinkAdpcmFrame(padded)?.let { downlinkFrameQueue.addLast(it) }
+                encodeNrfDownlinkFrame(padded)?.let { downlinkFrameQueue.addLast(it) }
                 downlinkPcmCarry = ByteArray(0)
             } else {
                 downlinkPcmCarry = ByteArray(0)
@@ -1899,7 +1947,7 @@ private class BlinkyManagerImpl(
             var offset = 0
             while ((merged.size - offset) >= NRF_DOWNLINK_PCM_FRAME_BYTES) {
                 val frame = merged.copyOfRange(offset, offset + NRF_DOWNLINK_PCM_FRAME_BYTES)
-                encodeNrfDownlinkAdpcmFrame(frame)?.let { downlinkFrameQueue.addLast(it) }
+                encodeNrfDownlinkFrame(frame)?.let { downlinkFrameQueue.addLast(it) }
                 offset += NRF_DOWNLINK_PCM_FRAME_BYTES
             }
             downlinkPcmCarry = if (offset < merged.size) {
@@ -1916,7 +1964,7 @@ private class BlinkyManagerImpl(
             if (downlinkPcmCarry.isNotEmpty()) {
                 val padded = ByteArray(NRF_DOWNLINK_PCM_FRAME_BYTES)
                 System.arraycopy(downlinkPcmCarry, 0, padded, 0, downlinkPcmCarry.size)
-                encodeNrfDownlinkAdpcmFrame(padded)?.let { downlinkFrameQueue.addLast(it) }
+                encodeNrfDownlinkFrame(padded)?.let { downlinkFrameQueue.addLast(it) }
                 downlinkPcmCarry = ByteArray(0)
             }
             downlinkGrpcEos = true
@@ -1926,22 +1974,22 @@ private class BlinkyManagerImpl(
 
     private fun computeDownlinkTxIntervalMs(queuedFrames: Int, eos: Boolean): Long {
         if (eos) {
-            return 4L
+            return 2L
         }
         if (downlinkJitterMode) {
             return when {
-                queuedFrames <= 16 -> 4L
-                queuedFrames <= 48 -> 5L
-                queuedFrames <= 96 -> 6L
-                else -> 7L
+                queuedFrames <= 16 -> 2L
+                queuedFrames <= 48 -> 3L
+                queuedFrames <= 96 -> 4L
+                else -> 5L
             }
         }
         return when {
-            queuedFrames <= 8 -> 5L
-            queuedFrames <= 20 -> 6L
-            queuedFrames >= 96 -> 8L
-            queuedFrames >= 48 -> 7L
-            else -> NRF_DOWNLINK_TX_INTERVAL_MS
+            queuedFrames <= 8 -> 3L
+            queuedFrames <= 20 -> 4L
+            queuedFrames >= 96 -> 6L
+            queuedFrames >= 48 -> 5L
+            else -> 4L
         }
     }
 
@@ -2047,6 +2095,14 @@ private class BlinkyManagerImpl(
                     downlinkTiming?.blePlayEndMs = SystemClock.elapsedRealtime()
                     Timber.tag("GrpcAudioClient").i("BLE APP_PLAY_END (stream)")
                     logDownlinkTiming("ble_end")
+                    downlinkPlayDoneTimeoutJob?.cancel()
+                    downlinkPlayDoneTimeoutJob = scope.launch {
+                        delay(2500L)
+                        if (nrfPlaybackPending && !downlinkBleStarted) {
+                            Timber.tag("GrpcAudioClient").w("BLE PLAY_DONE timeout (stream fallback)")
+                            onNrfPlaybackDone()
+                        }
+                    }
                     downlinkSeq = seq
                     downlinkBleStarted = false
                     synchronized(downlinkFrameLock) {
@@ -2108,6 +2164,8 @@ private class BlinkyManagerImpl(
     }
 
     private fun onNrfPlaybackDone() {
+        downlinkPlayDoneTimeoutJob?.cancel()
+        downlinkPlayDoneTimeoutJob = null
         downlinkTiming?.nrfPlayDoneMs = SystemClock.elapsedRealtime()
         logDownlinkTiming("play_done")
         nrfPlaybackPending = false
@@ -2175,7 +2233,7 @@ private class BlinkyManagerImpl(
             while (nrfBufferFull) {
                 delay(10L)
             }
-            val encoded = encodeNrfDownlinkAdpcmFrame(frame) ?: break
+            val encoded = encodeNrfDownlinkFrame(frame) ?: break
             sendBleAudioFrame(encoded, downlinkSeq++)
             offset += take
         }
@@ -2300,6 +2358,8 @@ private class BlinkyManagerImpl(
         playbackAllowed = false
         playbackDraining = false
         playbackForceDrain = false
+        downlinkPlayDoneTimeoutJob?.cancel()
+        downlinkPlayDoneTimeoutJob = null
         nrfPlaybackPending = false
         downlinkBleStarted = false
         downlinkReplyActive = false

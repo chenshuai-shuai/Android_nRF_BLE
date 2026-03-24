@@ -80,6 +80,7 @@ object GrpcAudioClient {
     private var decodeAudioOutputBase64: Boolean = true
     private var autoDetectBase64Output: Boolean = true
     private var sendPaused: Boolean = false
+    @Volatile private var receivingAudioReply: Boolean = false
 
     private val formatBuilder = TrainiProto.AudioFormat.newBuilder()
         .setSampleRate(sampleRate)
@@ -304,16 +305,20 @@ object GrpcAudioClient {
                             if (bytes > 0) {
                                 val msg = "audio bytes=$bytes seq=${value.audioOutput.sequenceNumber}"
                                 GrpcStatusStore.setLastMessage(msg)
-                Timber.tag(TAG).i("gRPC RX %s", msg)
-                audioStartListener?.invoke()
-                val pcm = decodeAudioData(value.audioOutput.audioData)
-                audioOutputListener?.invoke(pcm)
+                                Timber.tag(TAG).i("gRPC RX %s", msg)
+                                if (!receivingAudioReply) {
+                                    receivingAudioReply = true
+                                    audioStartListener?.invoke()
+                                }
+                                val pcm = decodeAudioData(value.audioOutput.audioData)
+                                audioOutputListener?.invoke(pcm)
                             }
                         }
                         TrainiProto.ConversationEvent.EventCase.AUDIO_COMPLETE -> {
                             GrpcStatusStore.setLastMessage("audio complete")
-                        Timber.tag(TAG).i("gRPC RX audio complete")
-                        audioCompleteListener?.invoke()
+                            Timber.tag(TAG).i("gRPC RX audio complete")
+                            receivingAudioReply = false
+                            audioCompleteListener?.invoke()
                         }
                         TrainiProto.ConversationEvent.EventCase.ERROR -> {
                             val msg = "error=${value.error.code} ${value.error.message}"
@@ -332,10 +337,11 @@ object GrpcAudioClient {
             override fun onError(t: Throwable) {
                 if (closingStream) {
                     closingStream = false
-                    requestObserver = null
-                    streamReady = false
-                    return
-                }
+                requestObserver = null
+                streamReady = false
+                receivingAudioReply = false
+                return
+            }
                 GrpcStatusStore.setState("DISCONNECTED")
                 val msg = t.message ?: "unknown"
                 GrpcStatusStore.setLastMessage("error=$msg")
@@ -343,6 +349,7 @@ object GrpcAudioClient {
                 streamErrorListener?.invoke(msg)
                 requestObserver = null
                 streamReady = false
+                receivingAudioReply = false
                 pendingTestTone = testToneEnabled && !testToneSent
                 lastServerEventMs = 0L
                 lastClientSendMs = 0L
@@ -362,6 +369,7 @@ object GrpcAudioClient {
                 streamErrorListener?.invoke("completed")
                 requestObserver = null
                 streamReady = false
+                receivingAudioReply = false
                 pendingTestTone = testToneEnabled && !testToneSent
                 lastServerEventMs = 0L
                 lastClientSendMs = 0L
@@ -406,6 +414,7 @@ object GrpcAudioClient {
         }
         requestObserver = null
         streamReady = false
+        receivingAudioReply = false
         pendingTestTone = testToneEnabled && !testToneSent
     }
 
