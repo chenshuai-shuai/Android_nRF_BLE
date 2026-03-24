@@ -195,6 +195,7 @@ private class BlinkyManagerImpl(
     private val bitsPerSample = 16
     private val useBleMic = true
     private val useNrfSpeaker = true
+    private var nrfSpeakerVolumePercent = 420
     private val playbackFrameBytes = (sampleRateHz / 50) * channels * (bitsPerSample / 8)
     private var playbackStartFrames = 20  // ~400ms
     private var playbackLowFrames = 10    // ~200ms
@@ -823,8 +824,12 @@ private class BlinkyManagerImpl(
                     downlinkTiming?.grpcFirstMs = now
                 }
                 updateDownlinkIngressStats(now, pcm)
-                val pcm16 = prepareDownlinkPcm16k(pcm)
-                enqueueDownlinkStream(pcm16)
+                if (downlinkStrictBufferedMode) {
+                    appendDownlinkReplyChunk(pcm)
+                } else {
+                    val pcm16 = prepareDownlinkPcm16k(pcm)
+                    enqueueDownlinkStream(pcm16)
+                }
             } else {
                 enqueueAudio(pcm)
             }
@@ -852,7 +857,11 @@ private class BlinkyManagerImpl(
                 downlinkTiming?.grpcCompleteMs = SystemClock.elapsedRealtime()
                 logDownlinkTiming("grpc_complete")
                 downlinkReplyActive = false
-                enqueueDownlinkEos()
+                if (downlinkStrictBufferedMode) {
+                    prepareBufferedDownlinkPlayback()
+                } else {
+                    enqueueDownlinkEos()
+                }
             } else {
                 // Wait until playback buffer drains before allowing next talk
                 playbackAllowed = true
@@ -1414,6 +1423,52 @@ private class BlinkyManagerImpl(
         return Pair(peak, rms)
     }
 
+    private fun normalizeDownlinkForAdpcm(pcm16: ByteArray): ByteArray {
+        if (pcm16.size < 2 || (pcm16.size and 1) != 0) return pcm16
+        val (peak, rmsPower) = pcmStats(pcm16)
+        if (peak <= 0 || rmsPower <= 0) return pcm16
+
+        val rms = kotlin.math.sqrt(rmsPower.toDouble())
+        val targetPeak = 32300.0
+        val targetRms = 24500.0
+        val maxGain = 10.0
+        val gain = minOf(maxGain, targetPeak / peak.toDouble(), targetRms / rms)
+        if (gain <= 1.02) return pcm16
+
+        val out = ByteArray(pcm16.size)
+        var i = 0
+        while (i + 1 < pcm16.size) {
+            val lo = pcm16[i].toInt() and 0xFF
+            val hi = pcm16[i + 1].toInt()
+            var v = (hi shl 8) or lo
+            if ((v and 0x8000) != 0) v -= 0x10000
+
+            var y = v.toDouble() * gain
+            val ay = kotlin.math.abs(y)
+            if (ay > 22000.0) {
+                val sign = if (y >= 0.0) 1.0 else -1.0
+                val over = ay - 22000.0
+                val compressed = 22000.0 + over / 3.2
+                y = sign * compressed
+            }
+
+            val az = kotlin.math.abs(y)
+            if (az > 31200.0) {
+                val over = az - 31200.0
+                val compressed = 31200.0 + over * 0.015
+                y = if (y >= 0.0) compressed else -compressed
+            }
+
+            var yi = y.toInt()
+            if (yi > 32767) yi = 32767
+            if (yi < -32768) yi = -32768
+            out[i] = (yi and 0xFF).toByte()
+            out[i + 1] = ((yi shr 8) and 0xFF).toByte()
+            i += 2
+        }
+        return out
+    }
+
     private fun deEmphasisPcm16(pcm16: ByteArray, alpha: Float): ByteArray {
         if (pcm16.isEmpty()) return pcm16
         val out = ByteArray(pcm16.size)
@@ -1775,7 +1830,7 @@ private class BlinkyManagerImpl(
     private fun prepareDownlinkPcm16k(pcm24: ByteArray): ByteArray {
         val pcm16 = downlinkResampler.resamplePcm16le(pcm24)
         if (pcm16.isEmpty()) return pcm16
-        return pcm16
+        return if (useNrfSpeaker) normalizeDownlinkForAdpcm(pcm16) else pcm16
     }
 
     private fun shapeDownlinkSpeech16k(pcm16: ByteArray): ByteArray {
@@ -2030,6 +2085,7 @@ private class BlinkyManagerImpl(
                     nrfPlaybackPending = true
                     nrfBufferFull = false
                     nrfReady = false
+                    sendBleControl("APP_SPK_VOL:${nrfSpeakerVolumePercent.coerceIn(0, 500)}")
                     sendBleControl("APP_READY?")
                     val ready = waitForNrfReady(3000L)
                     if (!ready) {
@@ -2203,6 +2259,7 @@ private class BlinkyManagerImpl(
                     delay(500L)
                     continue
                 }
+                sendBleControl("APP_SPK_VOL:${nrfSpeakerVolumePercent.coerceIn(0, 500)}")
                 sendBleControl("APP_PLAY_START")
                 sendTestDownlink(tone)
                 sendBleAudioEnd(downlinkSeq++)
@@ -2289,6 +2346,10 @@ private class BlinkyManagerImpl(
             data,
             BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         ).enqueue()
+    }
+
+    fun setNrfSpeakerVolumePercent(percent: Int) {
+        nrfSpeakerVolumePercent = percent.coerceIn(0, 500)
     }
 
     private fun updateKeepalive() {
