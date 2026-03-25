@@ -68,6 +68,12 @@ class BlinkyViewModel @Inject constructor(
     val lastSavedPath = repository.lastSavedPath
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
+    val sensorLogging = repository.sensorLogging
+        .stateIn(viewModelScope, SharingStarted.Lazily, false)
+
+    val sensorLogStatus = repository.sensorLogStatus
+        .stateIn(viewModelScope, SharingStarted.Lazily, null)
+
     val grpcState = repository.grpcState
         .stateIn(viewModelScope, SharingStarted.Lazily, "DISCONNECTED")
 
@@ -144,6 +150,20 @@ class BlinkyViewModel @Inject constructor(
         val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
         viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
             repository.stopRecording()
+        }
+    }
+
+    fun startSensorLogging() {
+        val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
+            repository.startSensorLogging()
+        }
+    }
+
+    fun stopSensorLogging() {
+        val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
+            repository.stopSensorLogging()
         }
     }
 

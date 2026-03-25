@@ -56,6 +56,16 @@ interface Blinky {
     val lastSavedPath: StateFlow<String?>
 
     /**
+     * Whether sensor log saving to local storage is enabled.
+     */
+    val sensorLogging: StateFlow<Boolean>
+
+    /**
+     * Last sensor log save status.
+     */
+    val sensorLogStatus: StateFlow<String?>
+
+    /**
      * gRPC connection state.
      */
     val grpcState: StateFlow<String>
@@ -128,6 +138,16 @@ interface Blinky {
      * Stop audio recording and save to WAV file.
      */
     suspend fun stopRecording()
+
+    /**
+     * Start manual sensor log saving.
+     */
+    suspend fun startSensorLogging()
+
+    /**
+     * Stop manual sensor log saving and flush buffered sensor lines.
+     */
+    suspend fun stopSensorLogging()
 
     /**
      * Start a new conversation session (generates a new session ID).

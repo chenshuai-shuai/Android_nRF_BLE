@@ -72,6 +72,12 @@ class BlinkyRepository @Inject constructor(
     override val lastSavedPath: StateFlow<String?>
         get() = blinky.lastSavedPath
 
+    override val sensorLogging: StateFlow<Boolean>
+        get() = blinky.sensorLogging
+
+    override val sensorLogStatus: StateFlow<String?>
+        get() = blinky.sensorLogStatus
+
     override val grpcState: StateFlow<String>
         get() = blinky.grpcState
 
@@ -126,5 +132,13 @@ class BlinkyRepository @Inject constructor(
 
     override suspend fun stopRealtimeService() {
         blinky.stopRealtimeService()
+    }
+
+    override suspend fun startSensorLogging() {
+        blinky.startSensorLogging()
+    }
+
+    override suspend fun stopSensorLogging() {
+        blinky.stopSensorLogging()
     }
 }

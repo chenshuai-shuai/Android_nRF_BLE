@@ -32,10 +32,6 @@ object GrpcAudioClient {
     private var requestObserver: StreamObserver<TrainiProto.AudioChunk>? = null
     private var reconnectDelayMs = 1000L
     private var reconnectJob: Job? = null
-    private var heartbeatJob: Job? = null
-    private var heartbeatSeq: Long = 1
-    private var silenceJob: Job? = null
-    private var silenceSeq: Long = 2_000_000L
     private var senderJob: Job? = null
     @Volatile private var reconnecting: Boolean = false
     @Volatile private var connectivityLogging: Boolean = false
@@ -43,30 +39,20 @@ object GrpcAudioClient {
     @Volatile private var closingStream: Boolean = false
     private var connectivityListener: ((ConnectivityState) -> Unit)? = null
 
-    private var host: String = "3.92.76.102"
+    private var host: String = "traini-grpc-collar-dev-nlb-06c70e7556ee7ab5.elb.us-east-1.amazonaws.com"
     private var port: Int = 50051
     private var userId: String = "demo_user"
-    private var heartbeatIntervalMs: Long = 60_000L
     private var sentCounter: Long = 0
 
     private var sampleRate: Int = 24000
     private var channels: Int = 1
     private var bitDepth: Int = 16
-    private var testToneSent: Boolean = false
-    private var heartbeatEnabled: Boolean = false
-    private var silenceEnabled: Boolean = false
-    private var testToneEnabled: Boolean = false
     private var streamReady: Boolean = false
-    private var pendingTestTone: Boolean = false
     private var lastServerEventMs: Long = 0L
     private var lastClientSendMs: Long = 0L
     private var serverEventTimeoutMs: Long = 30_000L
     private var watchdogJob: Job? = null
     private var watchdogEnabled: Boolean = false
-    private var probeEnabled: Boolean = false
-    private var probeIntervalMs: Long = 3000L
-    private var probeJob: Job? = null
-    private var probeSeq: Long = 10_000_000L
     private var encodeAudioAsBase64: Boolean = true
     private var formatLocked: Boolean = false
     private var allowSendBeforeReady: Boolean = true
@@ -103,19 +89,6 @@ object GrpcAudioClient {
         formatBuilder.setSampleRate(sampleRate)
         formatBuilder.setChannels(channels)
         formatBuilder.setBitDepth(bitDepth)
-    }
-
-    fun setHeartbeatEnabled(enabled: Boolean) {
-        heartbeatEnabled = enabled
-    }
-
-    fun setSilenceEnabled(enabled: Boolean) {
-        silenceEnabled = enabled
-    }
-
-    fun setTestToneEnabled(enabled: Boolean) {
-        testToneEnabled = enabled
-        pendingTestTone = enabled && !testToneSent
     }
 
     fun setEncodeAudioAsBase64(enabled: Boolean) {
@@ -210,28 +183,11 @@ object GrpcAudioClient {
         watchdogEnabled = enabled
     }
 
-    fun setProbeEnabled(enabled: Boolean) {
-        probeEnabled = enabled
-    }
-
-    fun setProbeIntervalMs(intervalMs: Long) {
-        probeIntervalMs = intervalMs.coerceAtLeast(1000L)
-    }
-
     fun start(host: String = this.host, port: Int = this.port) {
         this.host = host
         this.port = port
         startSender()
         startStream()
-    }
-
-    fun setHeartbeatIntervalMs(intervalMs: Long) {
-        heartbeatIntervalMs = intervalMs.coerceAtLeast(10_000L)
-        if (heartbeatJob?.isActive == true) {
-            heartbeatJob?.cancel()
-            heartbeatJob = null
-            startHeartbeat()
-        }
     }
 
     fun sendAudio(pcm: ByteArray, seq: Long) {
@@ -250,14 +206,8 @@ object GrpcAudioClient {
         closing = true
         reconnectJob?.cancel()
         reconnectJob = null
-        heartbeatJob?.cancel()
-        heartbeatJob = null
-        silenceJob?.cancel()
-        silenceJob = null
         watchdogJob?.cancel()
         watchdogJob = null
-        probeJob?.cancel()
-        probeJob = null
         try {
             requestObserver?.onCompleted()
         } catch (t: Throwable) {
@@ -266,7 +216,6 @@ object GrpcAudioClient {
         requestObserver = null
         GrpcStatusStore.setState("DISCONNECTED")
         streamReady = false
-        pendingTestTone = testToneEnabled && !testToneSent
         watchdogEnabled = false
     }
 
@@ -292,12 +241,6 @@ object GrpcAudioClient {
                     if (!streamReady) {
                         streamReady = true
                         sessionStartListener?.invoke()
-                        if (pendingTestTone && !testToneSent) {
-                            scope.launch {
-                                delay(300)
-                                sendTestToneOnce()
-                            }
-                        }
                     }
                     when (value.eventCase) {
                         TrainiProto.ConversationEvent.EventCase.AUDIO_OUTPUT -> {
@@ -350,7 +293,6 @@ object GrpcAudioClient {
                 requestObserver = null
                 streamReady = false
                 receivingAudioReply = false
-                pendingTestTone = testToneEnabled && !testToneSent
                 lastServerEventMs = 0L
                 lastClientSendMs = 0L
                 scheduleReconnect()
@@ -370,26 +312,12 @@ object GrpcAudioClient {
                 requestObserver = null
                 streamReady = false
                 receivingAudioReply = false
-                pendingTestTone = testToneEnabled && !testToneSent
                 lastServerEventMs = 0L
                 lastClientSendMs = 0L
                 scheduleReconnect()
             }
         })
-
-        // Optional traffic generators are disabled by default to avoid
-        // pushing audio before the upstream websocket is ready.
-        if (heartbeatEnabled) {
-            startHeartbeat()
-        }
-        if (silenceEnabled) {
-            startSilencePackets()
-        }
-        pendingTestTone = testToneEnabled && !testToneSent
         startWatchdog()
-        if (probeEnabled) {
-            startProbe()
-        }
     }
 
     private fun ensureChannel() {
@@ -415,7 +343,6 @@ object GrpcAudioClient {
         requestObserver = null
         streamReady = false
         receivingAudioReply = false
-        pendingTestTone = testToneEnabled && !testToneSent
     }
 
     private fun startSender() {
@@ -501,18 +428,6 @@ object GrpcAudioClient {
         connectivityListener = listener
     }
 
-    private fun startHeartbeat() {
-        if (heartbeatJob?.isActive == true) return
-        heartbeatJob = scope.launch {
-            while (true) {
-                delay(heartbeatIntervalMs)
-                val seq = heartbeatSeq++
-                sendAudio(byteArrayOf(0x00, 0x00), seq)
-                Timber.tag(TAG).d("gRPC heartbeat seq=%d", seq)
-            }
-        }
-    }
-
     private fun startWatchdog() {
         if (watchdogJob?.isActive == true) return
         watchdogJob = scope.launch {
@@ -527,37 +442,6 @@ object GrpcAudioClient {
                     GrpcStatusStore.setLastMessage("server event timeout")
                     Timber.tag(TAG).w("gRPC server event timeout: %dms, pausing audio", idleMs)
                     scheduleReconnect()
-                }
-            }
-        }
-    }
-
-    private fun startProbe() {
-        if (probeJob?.isActive == true) return
-        probeJob = scope.launch {
-            while (true) {
-                delay(probeIntervalMs)
-                val observer = requestObserver ?: continue
-                val nowMs = System.currentTimeMillis()
-                val ts = TrainiProto.Timestamp.newBuilder()
-                    .setSeconds(nowMs / 1000L)
-                    .setNanos(((nowMs % 1000L) * 1_000_000L).toInt())
-                    .build()
-                val frameSamples = (sampleRate / 50).coerceAtLeast(1) // 20ms
-                val bytesPerSample = (bitDepth / 8).coerceAtLeast(1)
-                val frameBytes = frameSamples * channels * bytesPerSample
-                val pcm = ByteArray(frameBytes)
-                val chunk = TrainiProto.AudioChunk.newBuilder()
-                    .setAudioData(encodeAudioData(pcm))
-                    .setFormat(formatBuilder.build())
-                    .setSequenceNumber(probeSeq++)
-                    .setTimestamp(ts)
-                    .build()
-                try {
-                    observer.onNext(chunk)
-                    Timber.tag(TAG).i("gRPC probe sent seq=%d bytes=%d", probeSeq - 1, pcm.size)
-                } catch (t: Throwable) {
-                    Timber.tag(TAG).e("gRPC probe error: %s", t.message ?: "unknown")
                 }
             }
         }
@@ -594,55 +478,5 @@ object GrpcAudioClient {
             if (!ok) return false
         }
         return true
-    }
-
-    private fun startSilencePackets() {
-        if (silenceJob?.isActive == true) return
-        val frameSamples = (sampleRate / 50).coerceAtLeast(1) // 20ms frames
-        val bytesPerSample = (bitDepth / 8).coerceAtLeast(1)
-        val frameBytes = frameSamples * channels * bytesPerSample
-        val silent = ByteArray(frameBytes)
-        silenceJob = scope.launch {
-            while (true) {
-                delay(20L)
-                val seq = silenceSeq++
-                sendAudio(silent, seq)
-                Timber.tag(TAG).i("gRPC TX silence seq=%d bytes=%d", seq, silent.size)
-            }
-        }
-    }
-
-    private fun sendTestToneOnce(durationMs: Long = 1000L, freqHz: Double = 440.0) {
-        if (testToneSent) return
-        testToneSent = true
-        if (channels != 1 || bitDepth != 16) {
-            Timber.tag(TAG).w("Test tone expects 16-bit mono; current ch=%d depth=%d", channels, bitDepth)
-        }
-        val frameSamples = (sampleRate / 50).coerceAtLeast(1) // 20ms frames
-        val totalSamples = (sampleRate * durationMs / 1000L).toInt().coerceAtLeast(frameSamples)
-        val amplitude = (Short.MAX_VALUE * 0.25).toInt()
-        var phase = 0.0
-        val phaseStep = 2.0 * Math.PI * freqHz / sampleRate
-        var seq = 1_000_000L
-        var sentSamples = 0
-        while (sentSamples < totalSamples) {
-            val samplesThisFrame = minOf(frameSamples, totalSamples - sentSamples)
-            val pcm = ByteArray(samplesThisFrame * 2)
-            var outIdx = 0
-            repeat(samplesThisFrame) {
-                val v = (kotlin.math.sin(phase) * amplitude).toInt().toShort()
-                pcm[outIdx++] = (v.toInt() and 0xFF).toByte()
-                pcm[outIdx++] = ((v.toInt() shr 8) and 0xFF).toByte()
-                phase += phaseStep
-                if (phase > 2.0 * Math.PI) {
-                    phase -= 2.0 * Math.PI
-                }
-            }
-            sendAudio(pcm, seq++)
-            sentSamples += samplesThisFrame
-        }
-        val msg = "test tone sent ${durationMs}ms @ ${freqHz}Hz"
-        GrpcStatusStore.setLastMessage(msg)
-        Timber.tag(TAG).i("gRPC %s", msg)
     }
 }

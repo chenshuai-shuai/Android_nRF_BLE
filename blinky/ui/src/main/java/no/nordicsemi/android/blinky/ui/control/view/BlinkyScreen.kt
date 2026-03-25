@@ -79,6 +79,8 @@ internal fun BlinkyScreen(
                     val audioStats by viewModel.audioStats.collectAsStateWithLifecycle()
                     val recording by viewModel.recording.collectAsStateWithLifecycle()
                     val lastSavedPath by viewModel.lastSavedPath.collectAsStateWithLifecycle()
+                    val sensorLogging by viewModel.sensorLogging.collectAsStateWithLifecycle()
+                    val sensorLogStatus by viewModel.sensorLogStatus.collectAsStateWithLifecycle()
                     val grpcState by viewModel.grpcState.collectAsStateWithLifecycle()
                     val grpcLastMessage by viewModel.grpcLastMessage.collectAsStateWithLifecycle()
                     val gpsData by viewModel.gpsData.collectAsStateWithLifecycle()
@@ -96,8 +98,6 @@ internal fun BlinkyScreen(
                     val lastPpg = ppgMessages.lastOrNull()
                     val lastImu = imuMessages.lastOrNull()
                     val lastGps = gpsMessages.lastOrNull()
-                    val saveMessages = rxMessages.filter { it.startsWith("SAVE ") }
-                    val lastSave = saveMessages.lastOrNull()
                     val sensorMessages = rxMessages.filter {
                         it.startsWith("PPG ") ||
                             it.startsWith("IMU ") ||
@@ -170,13 +170,27 @@ internal fun BlinkyScreen(
                         Text(text = "Frames: ${audioStats.frames}  Dropped: ${audioStats.droppedFrames}")
                         Text(text = "Last Seq: ${audioStats.lastSeq}")
                         Spacer(modifier = Modifier.height(8.dp))
-                    Text(text = "Recording: ${if (recording) "ON" else "OFF"} (manual)")
+                    Text(text = "Sensor Log Saving: ${if (sensorLogging) "ON" else "OFF"} (manual)")
 
                     Spacer(modifier = Modifier.height(12.dp))
-                    Text(text = "Save Status")
-                    Text(text = lastSave ?: "(no saves yet)")
+                    Text(text = "Sensor Save Status")
+                    Text(text = sensorLogStatus ?: "(manual/off)")
+                        Button(
+                            onClick = {
+                                if (sensorLogging) {
+                                    viewModel.stopSensorLogging()
+                                } else {
+                                    viewModel.startSensorLogging()
+                                }
+                            },
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        ) {
+                            Text(text = if (sensorLogging) "Stop Sensor Save" else "Start Sensor Save")
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(text = "Audio Recording: ${if (recording) "ON" else "OFF"} (manual)")
                         if (lastSavedPath != null) {
-                            Text(text = "Saved: $lastSavedPath")
+                            Text(text = "Audio Saved: $lastSavedPath")
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         Button(

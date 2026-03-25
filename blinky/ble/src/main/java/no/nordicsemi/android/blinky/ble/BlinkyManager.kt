@@ -24,7 +24,6 @@ import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import no.nordicsemi.android.ble.BleManager
 import no.nordicsemi.android.ble.ktx.getCharacteristic
@@ -68,6 +67,7 @@ private class BlinkyManagerImpl(
 
     init {
         dataLogger.setOnSaved { msg ->
+            _sensorLogStatus.value = msg
             appendRxMessage("SAVE $msg")
             // Ensure each saved file has at least one record of each sensor (if available).
             lastPpgLine?.let { dataLogger.appendSnapshot(it) }
@@ -99,6 +99,12 @@ private class BlinkyManagerImpl(
 
     private val _lastSavedPath = MutableStateFlow<String?>(null)
     override val lastSavedPath = _lastSavedPath.asStateFlow()
+
+    private val _sensorLogging = MutableStateFlow(false)
+    override val sensorLogging = _sensorLogging.asStateFlow()
+
+    private val _sensorLogStatus = MutableStateFlow<String?>(null)
+    override val sensorLogStatus = _sensorLogStatus.asStateFlow()
 
     override val grpcState = GrpcStatusStore.state
     override val grpcLastMessage = GrpcStatusStore.lastMessage
@@ -167,18 +173,10 @@ private class BlinkyManagerImpl(
     @Volatile private var nrfMicPaused: Boolean = false
     @Volatile private var nrfBufferFull: Boolean = false
     @Volatile private var nrfReady: Boolean = false
-    private val downlinkTestEnabled = false
     private val nrfSpeakerPreferBufferedPlayback = true
-    private var downlinkTestJob: Job? = null
-    private val playDoneSignal = Channel<Unit>(Channel.CONFLATED)
     private var downlinkTimingSeq: Int = 0
     private var downlinkTiming: DownlinkTiming? = null
     @Volatile private var downlinkAudioSeen: Boolean = false
-    private val simulatedHalfDuplexLoopEnabled = false
-    private val simulatedUplinkWindowMs = 10_000L
-    private var simulatedUplinkAccumMs = 0L
-    private var simulatedRound = 0
-    private var simulatedClip16k: ByteArray? = null
 
     @Volatile private var pendingSessionReset: Boolean = false
     @Volatile private var pendingSessionResetId: String? = null
@@ -195,7 +193,7 @@ private class BlinkyManagerImpl(
     private val bitsPerSample = 16
     private val useBleMic = true
     private val useNrfSpeaker = true
-    private var nrfSpeakerVolumePercent = 420
+    private var nrfSpeakerVolumePercent = 460
     private val playbackFrameBytes = (sampleRateHz / 50) * channels * (bitsPerSample / 8)
     private var playbackStartFrames = 20  // ~400ms
     private var playbackLowFrames = 10    // ~200ms
@@ -376,6 +374,8 @@ private class BlinkyManagerImpl(
         recordBuffer.reset()
         recordingActive = false
         _recording.value = false
+        dataLogger.stop()
+        _sensorLogging.value = false
 
         val wasConnected = isReady
         // If the device wasn't connected, it means that ConnectRequest was still pending.
@@ -432,7 +432,6 @@ private class BlinkyManagerImpl(
 
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun initialize() {
-        dataLogger.start()
         // Enable notifications for the TX characteristic (from nRF to App).
         setNotificationCallback(buttonCharacteristic).with(buttonCallback)
         enableNotifications(buttonCharacteristic).enqueue()
@@ -479,24 +478,13 @@ private class BlinkyManagerImpl(
         )
         GrpcSensorClient.start()
         startGpsUpdates()
-        simulatedUplinkAccumMs = 0L
-        simulatedRound = 0
-        simulatedClip16k = generateTestPattern16k()
-        if (simulatedHalfDuplexLoopEnabled) {
-            Timber.tag("GrpcAudioClient").i("Sim half-duplex enabled: uplink_window=%dms downlink_clip=5000ms", simulatedUplinkWindowMs)
-        }
-
-        if (downlinkTestEnabled) {
-            startDownlinkTest()
-        }
     }
 
     override fun onServicesInvalidated() {
         ledCharacteristic = null
         buttonCharacteristic = null
         dataLogger.stop()
-        downlinkTestJob?.cancel()
-        downlinkTestJob = null
+        _sensorLogging.value = false
         speexDsp.close()
         downlinkSpeexDsp.close()
         downlinkResampler.close()
@@ -746,7 +734,6 @@ private class BlinkyManagerImpl(
     }
 
     override suspend fun startConversation() {
-        if (downlinkTestEnabled) return
         if (_conversationState.value != ConversationState.IDLE) return
         _realtimeServiceEnabled.value = true
         sessionId = "session_${System.currentTimeMillis()}"
@@ -765,7 +752,6 @@ private class BlinkyManagerImpl(
             ensureAudioTrack()
         }
         GrpcAudioClient.startSession(sessionId!!)
-        sendPrimerFrame()
         GrpcAudioClient.setAudioStartListener {
             if (_conversationState.value != ConversationState.IDLE) {
                 _conversationState.value = ConversationState.WAITING_RESPONSE
@@ -912,7 +898,6 @@ private class BlinkyManagerImpl(
                     _conversationSessionReady.value = false
                     _conversationState.value = ConversationState.CONNECTING
                     GrpcAudioClient.startSession(sessionId!!)
-                    sendPrimerFrame()
                     startInitialSessionDelay()
                 }
             }
@@ -922,18 +907,15 @@ private class BlinkyManagerImpl(
     }
 
     override suspend fun startTalking() {
-        if (downlinkTestEnabled) return
         requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH).enqueue()
         startRealtimeService()
     }
 
     override suspend fun stopTalking() {
-        if (downlinkTestEnabled) return
         stopRealtimeService()
     }
 
     override suspend fun endConversation() {
-        if (downlinkTestEnabled) return
         if (_conversationState.value == ConversationState.IDLE) return
         _realtimeServiceEnabled.value = false
         stopMicCapture()
@@ -982,7 +964,6 @@ private class BlinkyManagerImpl(
     }
 
     override suspend fun startRealtimeService() {
-        if (downlinkTestEnabled) return
         _realtimeServiceEnabled.value = true
         requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH).enqueue()
         if (sessionId == null || _conversationState.value == ConversationState.IDLE) {
@@ -1059,7 +1040,6 @@ private class BlinkyManagerImpl(
                     val sendSeq = seq.toLong()
                     val decoded = decodeNrfAudioFrame(frameBytes)
                     if (decoded != null) {
-                        maybeTriggerSimulatedDownlink(decoded.first, decoded.second)
                         val processedBase = if (useSpeexDsp && decoded.second == 16000) {
                             speexDsp.processPcm16le(decoded.first)
                         } else {
@@ -1102,31 +1082,6 @@ private class BlinkyManagerImpl(
         )
         _audioStats.value = stats
         return true
-    }
-
-    private fun maybeTriggerSimulatedDownlink(pcm: ByteArray, sampleRate: Int) {
-        if (!simulatedHalfDuplexLoopEnabled) return
-        if (!isReady) return
-        if (sampleRate <= 0 || pcm.isEmpty()) return
-        val samples = pcm.size / 2
-        if (samples <= 0) return
-        val frameMs = (samples * 1000L) / sampleRate
-        if (frameMs <= 0) return
-        simulatedUplinkAccumMs += frameMs
-        if (simulatedUplinkAccumMs < simulatedUplinkWindowMs) return
-        if (downlinkStreamJob?.isActive == true || nrfPlaybackPending) return
-
-        val clip = simulatedClip16k ?: generateTestPattern16k().also { simulatedClip16k = it }
-        simulatedUplinkAccumMs = 0L
-        simulatedRound += 1
-        Timber.tag("GrpcAudioClient").i(
-            "Sim half-duplex round=%d trigger: uplink>=%dms, downlink=%d bytes",
-            simulatedRound,
-            simulatedUplinkWindowMs,
-            clip.size
-        )
-        enqueueDownlinkStream(clip)
-        enqueueDownlinkEos()
     }
 
     private fun decodeNrfAudioFrame(frame: ByteArray): Pair<ByteArray, Int>? {
@@ -1429,9 +1384,9 @@ private class BlinkyManagerImpl(
         if (peak <= 0 || rmsPower <= 0) return pcm16
 
         val rms = kotlin.math.sqrt(rmsPower.toDouble())
-        val targetPeak = 32300.0
-        val targetRms = 24500.0
-        val maxGain = 10.0
+        val targetPeak = 32500.0
+        val targetRms = 26000.0
+        val maxGain = 12.0
         val gain = minOf(maxGain, targetPeak / peak.toDouble(), targetRms / rms)
         if (gain <= 1.02) return pcm16
 
@@ -1445,17 +1400,17 @@ private class BlinkyManagerImpl(
 
             var y = v.toDouble() * gain
             val ay = kotlin.math.abs(y)
-            if (ay > 22000.0) {
+            if (ay > 21000.0) {
                 val sign = if (y >= 0.0) 1.0 else -1.0
-                val over = ay - 22000.0
-                val compressed = 22000.0 + over / 3.2
+                val over = ay - 21000.0
+                val compressed = 21000.0 + over / 2.8
                 y = sign * compressed
             }
 
             val az = kotlin.math.abs(y)
-            if (az > 31200.0) {
-                val over = az - 31200.0
-                val compressed = 31200.0 + over * 0.015
+            if (az > 32000.0) {
+                val over = az - 32000.0
+                val compressed = 32000.0 + over * 0.008
                 y = if (y >= 0.0) compressed else -compressed
             }
 
@@ -1665,13 +1620,6 @@ private class BlinkyManagerImpl(
         }
 
         return false
-    }
-
-    private fun sendPrimerFrame() {
-        val frameSamples = (sampleRateHz / 50).coerceAtLeast(1) // 20ms
-        val frameBytes = frameSamples * channels * (bitsPerSample / 8)
-        val pcm = ByteArray(frameBytes)
-        GrpcAudioClient.sendAudio(pcm, 0L)
     }
 
     private fun resample16kTo24k(pcm16: ByteArray): ByteArray {
@@ -2053,124 +2001,137 @@ private class BlinkyManagerImpl(
         downlinkStreamJob = scope.launch {
             var seq = downlinkSeq
             var nextTxAtMs = 0L
-            while (isActive) {
-                if (!downlinkBleStarted) {
-                    val queuedFrames = synchronized(downlinkFrameLock) { downlinkFrameQueue.size }
-                    val now = SystemClock.elapsedRealtime()
-                    val waitedMs = if (downlinkGrpcFirstChunkMs > 0L) now - downlinkGrpcFirstChunkMs else 0L
-                    val haveEnoughChunks = downlinkGrpcChunkCount >= 2
-                    val allowStart = synchronized(downlinkFrameLock) {
-                        if (downlinkStrictBufferedMode) {
-                            downlinkGrpcEos && queuedFrames > 0
-                        } else {
-                            downlinkGrpcEos ||
-                                ((queuedFrames >= downlinkAdaptiveStartFrames) &&
-                                    (haveEnoughChunks || waitedMs >= NRF_DOWNLINK_MAX_START_WAIT_MS))
+            try {
+                while (isActive) {
+                    if (!downlinkBleStarted) {
+                        val queuedFrames = synchronized(downlinkFrameLock) { downlinkFrameQueue.size }
+                        val now = SystemClock.elapsedRealtime()
+                        val waitedMs = if (downlinkGrpcFirstChunkMs > 0L) now - downlinkGrpcFirstChunkMs else 0L
+                        val haveEnoughChunks = downlinkGrpcChunkCount >= 2
+                        val allowStart = synchronized(downlinkFrameLock) {
+                            if (downlinkStrictBufferedMode) {
+                                downlinkGrpcEos && queuedFrames > 0
+                            } else {
+                                downlinkGrpcEos ||
+                                    ((queuedFrames >= downlinkAdaptiveStartFrames) &&
+                                        (haveEnoughChunks || waitedMs >= NRF_DOWNLINK_MAX_START_WAIT_MS))
+                            }
                         }
+                        if (!allowStart) {
+                            delay(2L)
+                            continue
+                        }
+                        if (ledCharacteristic == null) {
+                            abortNrfPlayback("led characteristic unavailable")
+                            break
+                        }
+                        nrfPlaybackPending = true
+                        nrfBufferFull = false
+                        nrfReady = false
+                        sendBleControl("APP_SPK_VOL:${nrfSpeakerVolumePercent.coerceIn(0, 500)}")
+                        sendBleControl("APP_READY?")
+                        val ready = waitForNrfReady(3000L)
+                        if (!ready) {
+                            Timber.tag("GrpcAudioClient").w("BLE NRF_READY timeout (stream)")
+                            abortNrfPlayback("NRF_READY timeout")
+                            break
+                        }
+                        Timber.tag("GrpcAudioClient").i(
+                            "DL start mode=%s queued=%d target=%d chunks=%d wait=%dms",
+                            if (downlinkStrictBufferedMode) {
+                                "strict_buffered"
+                            } else if (downlinkJitterMode) {
+                                "jitter"
+                            } else {
+                                "stream"
+                            },
+                            queuedFrames,
+                            downlinkAdaptiveStartFrames,
+                            downlinkGrpcChunkCount,
+                            waitedMs
+                        )
+                        Timber.tag("GrpcAudioClient").i("BLE APP_PLAY_START (stream)")
+                        downlinkTiming?.blePlayStartMs = SystemClock.elapsedRealtime()
+                        sendBleControl("APP_PLAY_START")
+                        downlinkBleStarted = true
+                        nextTxAtMs = 0L
                     }
-                    if (!allowStart) {
+
+                    if (nrfBufferFull) {
                         delay(2L)
                         continue
                     }
-                    if (ledCharacteristic == null) {
+
+                    val encoded = synchronized(downlinkFrameLock) {
+                        if (downlinkFrameQueue.isNotEmpty()) downlinkFrameQueue.removeFirst() else null
+                    }
+                    if (encoded != null) {
+                        val queuedFrames = synchronized(downlinkFrameLock) { downlinkFrameQueue.size }
+                        val eosPending = synchronized(downlinkFrameLock) { downlinkGrpcEos }
+                        val txIntervalMs = computeDownlinkTxIntervalMs(queuedFrames, eosPending)
+                        val now = SystemClock.elapsedRealtime()
+                        if (nextTxAtMs == 0L) {
+                            nextTxAtMs = now
+                        } else if (now < nextTxAtMs) {
+                            delay(nextTxAtMs - now)
+                        }
+                        sendBleAudioFrame(encoded, seq++)
+                        val txDoneMs = SystemClock.elapsedRealtime()
+                        val baseMs = if (nextTxAtMs > txDoneMs) nextTxAtMs else txDoneMs
+                        nextTxAtMs = baseMs + txIntervalMs
+                        continue
+                    }
+
+                    val eos = synchronized(downlinkFrameLock) { downlinkGrpcEos }
+                    if (eos) {
+                        sendBleAudioEnd(seq++)
+                        downlinkTiming?.blePlayEndMs = SystemClock.elapsedRealtime()
+                        Timber.tag("GrpcAudioClient").i("BLE APP_PLAY_END (stream)")
+                        logDownlinkTiming("ble_end")
+                        downlinkPlayDoneTimeoutJob?.cancel()
+                        downlinkPlayDoneTimeoutJob = scope.launch {
+                            delay(2500L)
+                            if (nrfPlaybackPending && !downlinkBleStarted) {
+                                Timber.tag("GrpcAudioClient").w("BLE PLAY_DONE timeout (stream fallback)")
+                                onNrfPlaybackDone()
+                            }
+                        }
+                        downlinkSeq = seq
+                        downlinkBleStarted = false
                         synchronized(downlinkFrameLock) {
-                            downlinkFrameQueue.clear()
-                            downlinkPcmCarry = ByteArray(0)
                             downlinkGrpcEos = false
                         }
-                        nrfPlaybackPending = false
-                        GrpcAudioClient.setSendPaused(false)
                         break
                     }
-                    nrfPlaybackPending = true
-                    nrfBufferFull = false
-                    nrfReady = false
-                    sendBleControl("APP_SPK_VOL:${nrfSpeakerVolumePercent.coerceIn(0, 500)}")
-                    sendBleControl("APP_READY?")
-                    val ready = waitForNrfReady(3000L)
-                    if (!ready) {
-                        Timber.tag("GrpcAudioClient").w("BLE NRF_READY timeout (stream)")
-                        synchronized(downlinkFrameLock) {
-                            downlinkFrameQueue.clear()
-                            downlinkPcmCarry = ByteArray(0)
-                            downlinkGrpcEos = false
-                        }
-                        nrfPlaybackPending = false
-                        GrpcAudioClient.setSendPaused(false)
-                        break
-                    }
-                    Timber.tag("GrpcAudioClient").i(
-                        "DL start mode=%s queued=%d target=%d chunks=%d wait=%dms",
-                        if (downlinkStrictBufferedMode) {
-                            "strict_buffered"
-                        } else if (downlinkJitterMode) {
-                            "jitter"
-                        } else {
-                            "stream"
-                        },
-                        queuedFrames,
-                        downlinkAdaptiveStartFrames,
-                        downlinkGrpcChunkCount,
-                        waitedMs
-                    )
-                    Timber.tag("GrpcAudioClient").i("BLE APP_PLAY_START (stream)")
-                    downlinkTiming?.blePlayStartMs = SystemClock.elapsedRealtime()
-                    sendBleControl("APP_PLAY_START")
-                    downlinkBleStarted = true
-                    nextTxAtMs = 0L
-                }
 
-                if (nrfBufferFull) {
-                    delay(2L)
-                    continue
+                    delay(1L)
                 }
-
-                val encoded = synchronized(downlinkFrameLock) {
-                    if (downlinkFrameQueue.isNotEmpty()) downlinkFrameQueue.removeFirst() else null
-                }
-                if (encoded != null) {
-                    val queuedFrames = synchronized(downlinkFrameLock) { downlinkFrameQueue.size }
-                    val eosPending = synchronized(downlinkFrameLock) { downlinkGrpcEos }
-                    val txIntervalMs = computeDownlinkTxIntervalMs(queuedFrames, eosPending)
-                    val now = SystemClock.elapsedRealtime()
-                    if (nextTxAtMs == 0L) {
-                        nextTxAtMs = now
-                    } else if (now < nextTxAtMs) {
-                        delay(nextTxAtMs - now)
-                    }
-                    sendBleAudioFrame(encoded, seq++)
-                    val txDoneMs = SystemClock.elapsedRealtime()
-                    val baseMs = if (nextTxAtMs > txDoneMs) nextTxAtMs else txDoneMs
-                    nextTxAtMs = baseMs + txIntervalMs
-                    continue
-                }
-
-                val eos = synchronized(downlinkFrameLock) { downlinkGrpcEos }
-                if (eos) {
-                    sendBleAudioEnd(seq++)
-                    downlinkTiming?.blePlayEndMs = SystemClock.elapsedRealtime()
-                    Timber.tag("GrpcAudioClient").i("BLE APP_PLAY_END (stream)")
-                    logDownlinkTiming("ble_end")
-                    downlinkPlayDoneTimeoutJob?.cancel()
-                    downlinkPlayDoneTimeoutJob = scope.launch {
-                        delay(2500L)
-                        if (nrfPlaybackPending && !downlinkBleStarted) {
-                            Timber.tag("GrpcAudioClient").w("BLE PLAY_DONE timeout (stream fallback)")
-                            onNrfPlaybackDone()
-                        }
-                    }
-                    downlinkSeq = seq
-                    downlinkBleStarted = false
-                    synchronized(downlinkFrameLock) {
-                        downlinkGrpcEos = false
-                    }
-                    break
-                }
-
-                delay(1L)
+            } catch (t: Throwable) {
+                Timber.tag("GrpcAudioClient").e(t, "NRF downlink stream failed")
+                abortNrfPlayback("downlink stream exception")
+            } finally {
+                downlinkStreamJob = null
             }
-            downlinkStreamJob = null
         }
+    }
+
+    override suspend fun startSensorLogging() {
+        dataLogger.start()
+        _sensorLogging.value = true
+        _sensorLogStatus.value = "SENSOR_LOGGING_STARTED"
+        appendRxMessage("SAVE sensor logging started")
+    }
+
+    override suspend fun stopSensorLogging() {
+        if (!_sensorLogging.value) {
+            return
+        }
+        dataLogger.stop()
+        _sensorLogging.value = false
+        if (_sensorLogStatus.value == "SENSOR_LOGGING_STARTED") {
+            _sensorLogStatus.value = "SENSOR_LOGGING_STOPPED"
+        }
+        appendRxMessage("SAVE sensor logging stopped")
     }
 
     private suspend fun sendBleAudioFrame(payload: ByteArray, seq: Int) {
@@ -2230,9 +2191,6 @@ private class BlinkyManagerImpl(
         downlinkReplyActive = false
         downlinkAudioSeen = false
         downlinkTiming = null
-        if (downlinkTestEnabled) {
-            playDoneSignal.trySend(Unit)
-        }
         if (nrfMicPaused) {
             sendBleControl("APP_MIC_RESUME")
             nrfMicPaused = false
@@ -2245,89 +2203,35 @@ private class BlinkyManagerImpl(
         }
     }
 
-    private fun startDownlinkTest() {
-        if (downlinkTestJob?.isActive == true) return
-        downlinkTestJob = scope.launch {
-            delay(500L)
-            val tone = generateTestPattern16k()
-            Timber.tag("GrpcAudioClient").i("Downlink test enabled: clip=%d ms, cadence=~5s", 5000)
-            while (downlinkTestEnabled && isReady) {
-                sendBleControl("APP_READY?")
-                val ready = waitForNrfReady(3000L)
-                if (!ready) {
-                    Timber.tag("GrpcAudioClient").w("BLE NRF_READY timeout (test)")
-                    delay(500L)
-                    continue
-                }
-                sendBleControl("APP_SPK_VOL:${nrfSpeakerVolumePercent.coerceIn(0, 500)}")
-                sendBleControl("APP_PLAY_START")
-                sendTestDownlink(tone)
-                sendBleAudioEnd(downlinkSeq++)
-                val done = withTimeoutOrNull<Unit>(10_000L) {
-                    playDoneSignal.receive()
-                }
-                if (done == null) {
-                    Timber.tag("GrpcAudioClient").w("BLE PLAY_DONE timeout (test)")
-                }
-                nrfReady = false
+    private fun abortNrfPlayback(reason: String, clearQueuedAudio: Boolean = true) {
+        Timber.tag("GrpcAudioClient").w("Abort NRF playback: %s", reason)
+        downlinkPlayDoneTimeoutJob?.cancel()
+        downlinkPlayDoneTimeoutJob = null
+        nrfPlaybackPending = false
+        nrfReady = false
+        nrfBufferFull = false
+        downlinkBleStarted = false
+        downlinkReplyActive = false
+        downlinkAudioSeen = false
+        downlinkTiming = null
+        if (clearQueuedAudio) {
+            synchronized(downlinkFrameLock) {
+                downlinkFrameQueue.clear()
+                downlinkPcmCarry = ByteArray(0)
+                downlinkGrpcEos = false
             }
+            resetDownlinkReplyBuffer()
+            resetDownlinkSpeechPipeline()
         }
-    }
-
-    private suspend fun sendTestDownlink(pcm16: ByteArray) {
-        val frameBytes = NRF_DOWNLINK_PCM_FRAME_BYTES
-        var offset = 0
-        while (offset < pcm16.size) {
-            val remaining = pcm16.size - offset
-            val take = minOf(frameBytes, remaining)
-            val frame = if (take == frameBytes) {
-                pcm16.copyOfRange(offset, offset + take)
-            } else {
-                val padded = ByteArray(frameBytes)
-                System.arraycopy(pcm16, offset, padded, 0, take)
-                padded
-            }
-            while (nrfBufferFull) {
-                delay(10L)
-            }
-            val encoded = encodeNrfDownlinkFrame(frame) ?: break
-            sendBleAudioFrame(encoded, downlinkSeq++)
-            offset += take
+        if (nrfMicPaused) {
+            sendBleControl("APP_MIC_RESUME")
+            nrfMicPaused = false
         }
-    }
-
-    private fun generateTestPattern16k(): ByteArray {
-        val sr = nrfSampleRateHz
-        val amp = (Short.MAX_VALUE * 0.32).toInt()
-        val toneMs = 500
-        val freqs = doubleArrayOf(
-            440.0, 880.0, 660.0, 990.0, 550.0,
-            770.0, 330.0, 1040.0, 620.0, 880.0
-        ) // 10 * 500ms = 5s
-
-        fun appendTone(freqHz: Double, durMs: Int, dst: ByteArray, startIdx: Int): Int {
-            val totalSamples = (sr * durMs / 1000.0).toInt()
-            var phase = 0.0
-            val step = 2.0 * Math.PI * freqHz / sr
-            var idx = startIdx
-            repeat(totalSamples) {
-                val v = (kotlin.math.sin(phase) * amp).toInt().toShort()
-                dst[idx++] = (v.toInt() and 0xFF).toByte()
-                dst[idx++] = ((v.toInt() shr 8) and 0xFF).toByte()
-                phase += step
-                if (phase > 2.0 * Math.PI) phase -= 2.0 * Math.PI
-            }
-            return idx
+        if (_conversationState.value == ConversationState.WAITING_RESPONSE) {
+            autoResumeRealtimeUplink()
+        } else if (_realtimeServiceEnabled.value) {
+            GrpcAudioClient.setSendPaused(false)
         }
-
-        val totalMs = toneMs * freqs.size
-        val totalSamples = (sr * totalMs / 1000.0).toInt()
-        val pcm = ByteArray(totalSamples * 2)
-        var idx = 0
-        freqs.forEach { f ->
-            idx = appendTone(f, toneMs, pcm, idx)
-        }
-        return if (idx == pcm.size) pcm else pcm.copyOf(idx)
     }
 
     private suspend fun waitForNrfReady(timeoutMs: Long): Boolean {
@@ -2422,13 +2326,19 @@ private class BlinkyManagerImpl(
         downlinkPlayDoneTimeoutJob?.cancel()
         downlinkPlayDoneTimeoutJob = null
         nrfPlaybackPending = false
+        nrfReady = false
+        nrfBufferFull = false
         downlinkBleStarted = false
         downlinkReplyActive = false
+        downlinkAudioSeen = false
+        downlinkTiming = null
         synchronized(downlinkFrameLock) {
             downlinkFrameQueue.clear()
             downlinkPcmCarry = ByteArray(0)
             downlinkGrpcEos = false
         }
+        resetDownlinkReplyBuffer()
+        resetDownlinkSpeechPipeline()
         downlinkStreamJob?.cancel()
         downlinkStreamJob = null
         stopKeepalive()

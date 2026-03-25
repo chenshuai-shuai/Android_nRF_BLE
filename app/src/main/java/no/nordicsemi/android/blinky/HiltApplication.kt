@@ -24,7 +24,5 @@ class HiltApplication : Application() {
         GrpcAudioClient.setDecodeAudioOutputBase64(true)
         GrpcAudioClient.setAutoDetectBase64Output(true)
         GrpcAudioClient.setFormatLocked(true)
-        GrpcAudioClient.setTestToneEnabled(false)
-        GrpcAudioClient.setProbeEnabled(false)
     }
 }

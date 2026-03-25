@@ -129,7 +129,6 @@ class ConversationViewModel @Inject constructor(
         try {
             ensureAudioTrack()
             GrpcAudioClient.startSession(id)
-            sendPrimerFrame()
             GrpcAudioClient.setWatchdogEnabled(false)
             _sessionReady.value = false
             GrpcAudioClient.setSessionStartListener {
@@ -245,14 +244,6 @@ class ConversationViewModel @Inject constructor(
                 }
             }
         }
-    }
-
-    private fun sendPrimerFrame() {
-        val frameSamples = (sampleRateHz / 50).coerceAtLeast(1) // 20ms
-        val frameBytes = frameSamples * channels * (bitsPerSample / 8)
-        val pcm = ByteArray(frameBytes)
-        Timber.tag("GrpcAudioClient").i("Primer frame bytes=%d", frameBytes)
-        GrpcAudioClient.sendAudio(pcm, talkSeq++)
     }
 
     private fun stopMicCapture() {

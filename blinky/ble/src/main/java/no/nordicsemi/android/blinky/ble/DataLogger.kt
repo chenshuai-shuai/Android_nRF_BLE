@@ -27,12 +27,14 @@ class DataLogger(
     private val queue = ConcurrentLinkedQueue<String>()
     private var writerJob: Job? = null
     private var onSaved: ((String) -> Unit)? = null
+    @Volatile private var enabled: Boolean = false
 
     fun setOnSaved(cb: ((String) -> Unit)?) {
         onSaved = cb
     }
 
     fun start() {
+        enabled = true
         if (writerJob?.isActive == true) return
         writerJob = scope.launch {
             while (isActive) {
@@ -43,16 +45,23 @@ class DataLogger(
     }
 
     fun stop() {
+        if (!enabled && writerJob == null) {
+            queue.clear()
+            return
+        }
+        enabled = false
         writerJob?.cancel()
         writerJob = null
         flushMinute()
     }
 
     fun append(line: String) {
+        if (!enabled) return
         queue.add(line)
     }
 
     fun appendSnapshot(line: String) {
+        if (!enabled) return
         // Always include at least one line for each sensor in a file if available.
         queue.add(line)
     }
