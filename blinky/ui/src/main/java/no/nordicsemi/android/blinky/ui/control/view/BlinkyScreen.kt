@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.height
 import no.nordicsemi.android.blinky.spec.Blinky
 import no.nordicsemi.android.blinky.spec.ConversationState
 import no.nordicsemi.android.blinky.ui.R
+import no.nordicsemi.android.blinky.ui.control.BlinkyDevice
 import no.nordicsemi.android.blinky.ui.control.viewmodel.BlinkyViewModel
 import no.nordicsemi.android.common.logger.view.LoggerAppBarIcon
 import no.nordicsemi.android.common.permissions.ble.RequireBluetooth
@@ -40,6 +41,7 @@ import no.nordicsemi.android.scanner.view.Reason
 internal fun BlinkyScreen(
     onNavigateUp: () -> Unit,
     onOpenRuntimeLog: () -> Unit,
+    onOpenImuCalibration: (BlinkyDevice) -> Unit,
 ) {
     val viewModel: BlinkyViewModel = hiltViewModel()
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -157,6 +159,15 @@ internal fun BlinkyScreen(
                         Row(modifier = Modifier.padding(bottom = 8.dp)) {
                             Button(onClick = onOpenRuntimeLog) {
                                 Text(text = "Open Runtime Log")
+                            }
+                        }
+                        Row(modifier = Modifier.padding(bottom = 8.dp)) {
+                            Button(
+                                onClick = {
+                                    onOpenImuCalibration(BlinkyDevice(viewModel.device, viewModel.deviceName))
+                                }
+                            ) {
+                                Text(text = "Open IMU 3D Viewer")
                             }
                         }
 

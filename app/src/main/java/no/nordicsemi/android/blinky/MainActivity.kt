@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.compose.setContent
 import dagger.hilt.android.AndroidEntryPoint
 import no.nordicsemi.android.blinky.ui.conversation.ConversationDestination
+import no.nordicsemi.android.blinky.ui.calibration.ImuCalibrationDestination
 import no.nordicsemi.android.blinky.ui.control.BlinkyDestination
 import no.nordicsemi.android.blinky.ui.log.GrpcRuntimeLogDestination
 import no.nordicsemi.android.blinky.ui.scanner.ScannerDestination
@@ -23,6 +24,7 @@ class MainActivity: NordicActivity() {
                     ScannerDestination +
                         BlinkyDestination +
                         ConversationDestination +
+                        ImuCalibrationDestination +
                         GrpcRuntimeLogDestination
                 )
             }

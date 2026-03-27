@@ -1,6 +1,7 @@
 package no.nordicsemi.android.blinky.ui.control.viewmodel
 
 import android.app.Application
+import android.bluetooth.BluetoothDevice
 import android.content.Context
 import android.media.RingtoneManager
 import androidx.lifecycle.AndroidViewModel
@@ -30,6 +31,7 @@ import javax.inject.Named
 class BlinkyViewModel @Inject constructor(
     @ApplicationContext context: Context,
     private val repository: BlinkyRepository,
+    val device: BluetoothDevice,
     @Named("deviceName") val deviceName: String,
 ) : AndroidViewModel(context as Application) {
     /** The connection state of the device. */

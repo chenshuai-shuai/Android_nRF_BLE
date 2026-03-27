@@ -41,6 +41,16 @@ interface Blinky {
     val rxMessages: StateFlow<List<String>>
 
     /**
+     * Latest raw IMU sample received from nRF.
+     */
+    val imuRawSample: StateFlow<ImuRawSample?>
+
+    /**
+     * Latest fused attitude sample received from nRF.
+     */
+    val attitudeSample: StateFlow<AttitudeSample?>
+
+    /**
      * Audio stream statistics.
      */
     val audioStats: StateFlow<AudioStats>
@@ -64,6 +74,31 @@ interface Blinky {
      * Last sensor log save status.
      */
     val sensorLogStatus: StateFlow<String?>
+
+    /**
+     * IMU calibration state reported by nRF.
+     */
+    val imuCalibrationState: StateFlow<String>
+
+    /**
+     * Current IMU calibration step.
+     */
+    val imuCalibrationStep: StateFlow<String?>
+
+    /**
+     * Current IMU calibration hint.
+     */
+    val imuCalibrationHint: StateFlow<String?>
+
+    /**
+     * Latest IMU calibration result.
+     */
+    val imuCalibrationResult: StateFlow<String?>
+
+    /**
+     * IMU calibration blob status.
+     */
+    val imuCalibrationBlobStatus: StateFlow<String?>
 
     /**
      * gRPC connection state.
@@ -178,4 +213,34 @@ interface Blinky {
      * Stop automatic realtime conversation service.
      */
     suspend fun stopRealtimeService()
+
+    /**
+     * Enter exclusive IMU calibration mode.
+     */
+    suspend fun enterImuCalibration()
+
+    /**
+     * Exit IMU calibration mode.
+     */
+    suspend fun exitImuCalibration()
+
+    /**
+     * Start gyroscope bias calibration.
+     */
+    suspend fun startImuGyroCalibration()
+
+    /**
+     * Start accelerometer six-position calibration.
+     */
+    suspend fun startImuAccelCalibration()
+
+    /**
+     * Save IMU calibration to nRF flash.
+     */
+    suspend fun saveImuCalibration()
+
+    /**
+     * Abort the current IMU calibration session.
+     */
+    suspend fun abortImuCalibration()
 }

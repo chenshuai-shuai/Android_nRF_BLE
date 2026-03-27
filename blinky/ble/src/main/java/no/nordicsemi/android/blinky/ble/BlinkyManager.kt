@@ -35,19 +35,73 @@ import no.nordicsemi.android.blinky.ble.data.LedCallback
 import no.nordicsemi.android.blinky.ble.data.LedData
 import no.nordicsemi.android.ble.data.Data
 import no.nordicsemi.android.blinky.spec.Blinky
+import no.nordicsemi.android.blinky.spec.AttitudeSample
 import no.nordicsemi.android.blinky.spec.AudioStats
 import no.nordicsemi.android.blinky.spec.BlinkySpec
 import no.nordicsemi.android.blinky.spec.ConversationState
 import no.nordicsemi.android.blinky.spec.GpsData
 import no.nordicsemi.android.blinky.spec.GpsState
 import no.nordicsemi.android.blinky.spec.GrpcStatusStore
+import no.nordicsemi.android.blinky.spec.ImuRawSample
 import timber.log.Timber
 import java.io.ByteArrayOutputStream
+
+private object BlinkySharedManagers {
+    private data class Entry(
+        val manager: BlinkyManagerImpl,
+        var refs: Int,
+    )
+
+    private val entries = mutableMapOf<String, Entry>()
+
+    fun acquire(context: Context, device: BluetoothDevice): Blinky {
+        val key = device.address
+        val manager = synchronized(this) {
+            val existing = entries[key]
+            if (existing != null) {
+                existing.refs += 1
+                existing.manager
+            } else {
+                val created = BlinkyManagerImpl(context.applicationContext, device)
+                entries[key] = Entry(created, 1)
+                created
+            }
+        }
+        return SharedBlinkyLease(key, manager)
+    }
+
+    fun release(key: String) {
+        val managerToRelease = synchronized(this) {
+            val entry = entries[key] ?: return
+            entry.refs -= 1
+            if (entry.refs <= 0) {
+                entries.remove(key)
+                entry.manager
+            } else {
+                null
+            }
+        }
+        managerToRelease?.release()
+    }
+
+    private class SharedBlinkyLease(
+        private val key: String,
+        private val manager: Blinky,
+    ) : Blinky by manager {
+        @Volatile private var released = false
+
+        override fun release() {
+            if (released) return
+            released = true
+            BlinkySharedManagers.release(key)
+        }
+    }
+}
 
 class BlinkyManager(
     context: Context,
     device: BluetoothDevice
-): Blinky by BlinkyManagerImpl(context, device)
+): Blinky by BlinkySharedManagers.acquire(context, device)
 
 private class BlinkyManagerImpl(
     context: Context,
@@ -91,6 +145,12 @@ private class BlinkyManagerImpl(
     private val _rxMessages = MutableStateFlow<List<String>>(emptyList())
     override val rxMessages = _rxMessages.asStateFlow()
 
+    private val _imuRawSample = MutableStateFlow<ImuRawSample?>(null)
+    override val imuRawSample = _imuRawSample.asStateFlow()
+
+    private val _attitudeSample = MutableStateFlow<AttitudeSample?>(null)
+    override val attitudeSample = _attitudeSample.asStateFlow()
+
     private val _audioStats = MutableStateFlow(AudioStats())
     override val audioStats = _audioStats.asStateFlow()
 
@@ -105,6 +165,21 @@ private class BlinkyManagerImpl(
 
     private val _sensorLogStatus = MutableStateFlow<String?>(null)
     override val sensorLogStatus = _sensorLogStatus.asStateFlow()
+
+    private val _imuCalibrationState = MutableStateFlow("IDLE")
+    override val imuCalibrationState = _imuCalibrationState.asStateFlow()
+
+    private val _imuCalibrationStep = MutableStateFlow<String?>(null)
+    override val imuCalibrationStep = _imuCalibrationStep.asStateFlow()
+
+    private val _imuCalibrationHint = MutableStateFlow<String?>(null)
+    override val imuCalibrationHint = _imuCalibrationHint.asStateFlow()
+
+    private val _imuCalibrationResult = MutableStateFlow<String?>(null)
+    override val imuCalibrationResult = _imuCalibrationResult.asStateFlow()
+
+    private val _imuCalibrationBlobStatus = MutableStateFlow<String?>(null)
+    override val imuCalibrationBlobStatus = _imuCalibrationBlobStatus.asStateFlow()
 
     override val grpcState = GrpcStatusStore.state
     override val grpcLastMessage = GrpcStatusStore.lastMessage
@@ -283,6 +358,10 @@ private class BlinkyManagerImpl(
         private const val NRF_DOWNLINK_TX_INTERVAL_MS = 8L
         private const val APP_DATA_PART_PPG = 3
         private const val APP_DATA_PART_IMU = 4
+        private const val APP_DATA_PART_ATTITUDE = 6
+        private const val ATTITUDE_FLAG_VALID = 0x01
+        private const val ATTITUDE_FLAG_MOVING = 0x02
+        private const val ATTITUDE_FLAG_BIAS_READY = 0x04
     }
 
     override val state = stateAsFlow()
@@ -328,6 +407,9 @@ private class BlinkyManagerImpl(
                 if (text == "NRF_READY") {
                     nrfReady = true
                     Timber.tag("GrpcAudioClient").i("BLE NRF_READY")
+                    return
+                }
+                if (handleImuCalibrationMessage(text)) {
                     return
                 }
                 if (text.isNotEmpty()) {
@@ -376,6 +458,12 @@ private class BlinkyManagerImpl(
         _recording.value = false
         dataLogger.stop()
         _sensorLogging.value = false
+        _imuCalibrationState.value = "IDLE"
+        _imuCalibrationStep.value = null
+        _imuCalibrationHint.value = null
+        _imuCalibrationResult.value = null
+        _imuRawSample.value = null
+        _attitudeSample.value = null
 
         val wasConnected = isReady
         // If the device wasn't connected, it means that ConnectRequest was still pending.
@@ -485,6 +573,12 @@ private class BlinkyManagerImpl(
         buttonCharacteristic = null
         dataLogger.stop()
         _sensorLogging.value = false
+        _imuCalibrationState.value = "IDLE"
+        _imuCalibrationStep.value = null
+        _imuCalibrationHint.value = null
+        _imuCalibrationResult.value = null
+        _imuRawSample.value = null
+        _attitudeSample.value = null
         speexDsp.close()
         downlinkSpeexDsp.close()
         downlinkResampler.close()
@@ -1461,6 +1555,11 @@ private class BlinkyManagerImpl(
             (u8(bytes, off + 3).toLong() shl 24)
     }
 
+    private fun leI32(bytes: ByteArray, off: Int): Int {
+        val v = le32(bytes, off)
+        return if ((v and 0x80000000L) != 0L) (v - 0x100000000L).toInt() else v.toInt()
+    }
+
     private fun leI16(bytes: ByteArray, off: Int): Int {
         val v = le16(bytes, off)
         return if ((v and 0x8000) != 0) v - 0x10000 else v
@@ -1551,6 +1650,7 @@ private class BlinkyManagerImpl(
                             val gy = leI16(bytes, payloadOff + 12)
                             val gz = leI16(bytes, payloadOff + 14)
                             val tLsb = leI16(bytes, payloadOff + 16)
+                            val deviceTsMs = le32(bytes, payloadOff + 18).toLong() and 0xFFFFFFFFL
                             val tC = imuTempCenti(tLsb)
                             GrpcSensorClient.addImuSample(
                                 seq = seq,
@@ -1565,6 +1665,18 @@ private class BlinkyManagerImpl(
                             )
                             val imuRawLine =
                                 "${now},IMU_RAW,seq=${seq},ax=${ax},ay=${ay},az=${az},gx=${gx},gy=${gy},gz=${gz},temp_centi=${tC}"
+                            _imuRawSample.value = ImuRawSample(
+                                seq = seq,
+                                ax = ax,
+                                ay = ay,
+                                az = az,
+                                gx = gx,
+                                gy = gy,
+                                gz = gz,
+                                tempCenti = tC,
+                                deviceTimestampMs = deviceTsMs,
+                                receivedAtMs = now,
+                            )
                         dataLogger.append(imuRawLine)
                         lastImuRawLine = imuRawLine
                         if (now - lastImuRawMsgMs >= 1000L) {
@@ -1577,6 +1689,53 @@ private class BlinkyManagerImpl(
                     } else if (ver == 1 && now - lastImuMsgMs >= 1000L) {
                         lastImuMsgMs = now
                         appendRxMessage("IMU seq=${seq} (type=${type})")
+                    }
+                }
+                return true
+            }
+            APP_DATA_PART_ATTITUDE -> {
+                if (payloadLen >= 48) {
+                    val ver = u8(bytes, payloadOff)
+                    val type = u8(bytes, payloadOff + 1)
+                    if (ver == 1 && type == 1) {
+                        val seq = le16(bytes, payloadOff + 2)
+                        val deviceTsMs = le32(bytes, 8).toLong() and 0xFFFFFFFFL
+                        val now = System.currentTimeMillis()
+                        val flags = u8(bytes, payloadOff + 47)
+                        val sample = AttitudeSample(
+                            seq = seq,
+                            qwQ30 = leI32(bytes, payloadOff + 4),
+                            qxQ30 = leI32(bytes, payloadOff + 8),
+                            qyQ30 = leI32(bytes, payloadOff + 12),
+                            qzQ30 = leI32(bytes, payloadOff + 16),
+                            gravityXQ16 = leI32(bytes, payloadOff + 20),
+                            gravityYQ16 = leI32(bytes, payloadOff + 24),
+                            gravityZQ16 = leI32(bytes, payloadOff + 28),
+                            linearAccXQ16 = leI32(bytes, payloadOff + 32),
+                            linearAccYQ16 = leI32(bytes, payloadOff + 36),
+                            linearAccZQ16 = leI32(bytes, payloadOff + 40),
+                            accAccuracy = u8(bytes, payloadOff + 44),
+                            gyrAccuracy = u8(bytes, payloadOff + 45),
+                            magAccuracy = u8(bytes, payloadOff + 46),
+                            moving = (flags and ATTITUDE_FLAG_MOVING) != 0,
+                            biasReady = (flags and ATTITUDE_FLAG_BIAS_READY) != 0,
+                            deviceTimestampMs = deviceTsMs,
+                            receivedAtMs = now,
+                        )
+                        if ((flags and ATTITUDE_FLAG_VALID) != 0) {
+                            _attitudeSample.value = sample
+                        }
+                        val attitudeLine =
+                            "${now},ATTITUDE,seq=${seq},qw=${sample.qwQ30},qx=${sample.qxQ30},qy=${sample.qyQ30},qz=${sample.qzQ30}," +
+                                "acc_acc=${sample.accAccuracy},gyr_acc=${sample.gyrAccuracy},moving=${sample.moving},bias_ready=${sample.biasReady}"
+                        dataLogger.append(attitudeLine)
+                        if (now - lastImuMsgMs >= 1000L) {
+                            lastImuMsgMs = now
+                            appendRxMessage(
+                                "ATT seq=${seq} acc=${sample.accAccuracy} gyr=${sample.gyrAccuracy} " +
+                                    "moving=${sample.moving} bias=${sample.biasReady}"
+                            )
+                        }
                     }
                 }
                 return true
@@ -2250,6 +2409,67 @@ private class BlinkyManagerImpl(
             data,
             BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         ).enqueue()
+    }
+
+    private fun handleImuCalibrationMessage(text: String): Boolean {
+        if (text.isEmpty() || !text.startsWith("CAL_")) {
+            return false
+        }
+        Timber.tag("IMU_CAL").i("RX %s", text)
+        when {
+            text.startsWith("CAL_STATE:") -> {
+                _imuCalibrationState.value = text.removePrefix("CAL_STATE:")
+            }
+            text.startsWith("CAL_STEP:") -> {
+                _imuCalibrationStep.value = text.removePrefix("CAL_STEP:")
+            }
+            text.startsWith("CAL_HINT:") -> {
+                _imuCalibrationHint.value = text.removePrefix("CAL_HINT:")
+            }
+            text.startsWith("CAL_RESULT:") -> {
+                _imuCalibrationResult.value = text.removePrefix("CAL_RESULT:")
+            }
+            text.startsWith("CAL_BLOB:") -> {
+                _imuCalibrationBlobStatus.value = text.removePrefix("CAL_BLOB:")
+            }
+        }
+        appendRxMessage(text)
+        return true
+    }
+
+    private fun sendImuCalibrationCommand(cmd: String) {
+        Timber.tag("IMU_CAL").i("TX %s", cmd)
+        appendRxMessage("CAL_TX:$cmd")
+        sendBleControl(cmd)
+    }
+
+    override suspend fun enterImuCalibration() {
+        if (_realtimeServiceEnabled.value) {
+            stopRealtimeService()
+        }
+        sendImuCalibrationCommand("CAL_ENTER")
+    }
+
+    override suspend fun exitImuCalibration() {
+        sendImuCalibrationCommand("CAL_EXIT")
+    }
+
+    override suspend fun startImuGyroCalibration() {
+        _imuCalibrationResult.value = null
+        sendImuCalibrationCommand("CAL_START_GYRO")
+    }
+
+    override suspend fun startImuAccelCalibration() {
+        _imuCalibrationResult.value = null
+        sendImuCalibrationCommand("CAL_START_ACCEL")
+    }
+
+    override suspend fun saveImuCalibration() {
+        sendImuCalibrationCommand("CAL_SAVE")
+    }
+
+    override suspend fun abortImuCalibration() {
+        sendImuCalibrationCommand("CAL_ABORT")
     }
 
     fun setNrfSpeakerVolumePercent(percent: Int) {

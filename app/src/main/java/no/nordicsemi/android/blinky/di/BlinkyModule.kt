@@ -14,6 +14,8 @@ import no.nordicsemi.android.blinky.ble.BlinkyManager
 import no.nordicsemi.android.blinky.ui.control.Blinky
 import no.nordicsemi.android.blinky.spec.Blinky
 import no.nordicsemi.android.blinky.spec.R
+import no.nordicsemi.android.blinky.ui.calibration.ImuCalibration
+import no.nordicsemi.android.blinky.ui.control.BlinkyDevice
 import no.nordicsemi.android.common.navigation.get
 import javax.inject.Named
 
@@ -27,7 +29,7 @@ abstract class BlinkyModule {
         @Provides
         @ViewModelScoped
         fun provideBluetoothDevice(handle: SavedStateHandle): BluetoothDevice {
-            return handle.get(Blinky).device
+            return getNavDevice(handle).device
         }
 
         @Provides
@@ -37,7 +39,15 @@ abstract class BlinkyModule {
             @ApplicationContext context: Context,
             handle: SavedStateHandle,
         ): String {
-            return handle.get(Blinky).name ?: context.getString(R.string.unnamed_device)
+            return getNavDevice(handle).name ?: context.getString(R.string.unnamed_device)
+        }
+
+        private fun getNavDevice(handle: SavedStateHandle): BlinkyDevice {
+            return try {
+                handle.get(Blinky)
+            } catch (_: Throwable) {
+                handle.get(ImuCalibration)
+            }
         }
 
         @Provides

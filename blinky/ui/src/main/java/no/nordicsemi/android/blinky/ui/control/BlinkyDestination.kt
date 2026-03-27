@@ -4,6 +4,7 @@ import android.bluetooth.BluetoothDevice
 import android.os.Parcelable
 import androidx.hilt.navigation.compose.hiltViewModel
 import kotlinx.parcelize.Parcelize
+import no.nordicsemi.android.blinky.ui.calibration.ImuCalibration
 import no.nordicsemi.android.blinky.ui.log.GrpcRuntimeLog
 import no.nordicsemi.android.blinky.ui.control.view.BlinkyScreen
 import no.nordicsemi.android.common.navigation.createDestination
@@ -23,6 +24,7 @@ val BlinkyDestination = defineDestination(Blinky) {
 
     BlinkyScreen(
         onNavigateUp = { viewModel.navigateUp() },
-        onOpenRuntimeLog = { viewModel.navigateTo(GrpcRuntimeLog) }
+        onOpenRuntimeLog = { viewModel.navigateTo(GrpcRuntimeLog) },
+        onOpenImuCalibration = { device -> viewModel.navigateTo(ImuCalibration, device) }
     )
 }

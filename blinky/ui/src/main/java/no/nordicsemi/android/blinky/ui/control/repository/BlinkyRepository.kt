@@ -63,6 +63,12 @@ class BlinkyRepository @Inject constructor(
     override val rxMessages: StateFlow<List<String>>
         get() = blinky.rxMessages
 
+    override val imuRawSample: StateFlow<no.nordicsemi.android.blinky.spec.ImuRawSample?>
+        get() = blinky.imuRawSample
+
+    override val attitudeSample: StateFlow<no.nordicsemi.android.blinky.spec.AttitudeSample?>
+        get() = blinky.attitudeSample
+
     override val audioStats: StateFlow<no.nordicsemi.android.blinky.spec.AudioStats>
         get() = blinky.audioStats
 
@@ -77,6 +83,21 @@ class BlinkyRepository @Inject constructor(
 
     override val sensorLogStatus: StateFlow<String?>
         get() = blinky.sensorLogStatus
+
+    override val imuCalibrationState: StateFlow<String>
+        get() = blinky.imuCalibrationState
+
+    override val imuCalibrationStep: StateFlow<String?>
+        get() = blinky.imuCalibrationStep
+
+    override val imuCalibrationHint: StateFlow<String?>
+        get() = blinky.imuCalibrationHint
+
+    override val imuCalibrationResult: StateFlow<String?>
+        get() = blinky.imuCalibrationResult
+
+    override val imuCalibrationBlobStatus: StateFlow<String?>
+        get() = blinky.imuCalibrationBlobStatus
 
     override val grpcState: StateFlow<String>
         get() = blinky.grpcState
@@ -140,5 +161,29 @@ class BlinkyRepository @Inject constructor(
 
     override suspend fun stopSensorLogging() {
         blinky.stopSensorLogging()
+    }
+
+    override suspend fun enterImuCalibration() {
+        blinky.enterImuCalibration()
+    }
+
+    override suspend fun exitImuCalibration() {
+        blinky.exitImuCalibration()
+    }
+
+    override suspend fun startImuGyroCalibration() {
+        blinky.startImuGyroCalibration()
+    }
+
+    override suspend fun startImuAccelCalibration() {
+        blinky.startImuAccelCalibration()
+    }
+
+    override suspend fun saveImuCalibration() {
+        blinky.saveImuCalibration()
+    }
+
+    override suspend fun abortImuCalibration() {
+        blinky.abortImuCalibration()
     }
 }
