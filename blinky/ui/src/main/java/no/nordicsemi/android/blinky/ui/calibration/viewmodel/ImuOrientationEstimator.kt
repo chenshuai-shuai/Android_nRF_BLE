@@ -4,6 +4,7 @@ import no.nordicsemi.android.blinky.spec.ImuRawSample
 import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 internal data class Quaternion(
@@ -19,6 +20,44 @@ internal data class Quaternion(
     }
 
     fun conjugate(): Quaternion = Quaternion(w, -x, -y, -z)
+
+    fun dot(other: Quaternion): Float =
+        w * other.w + x * other.x + y * other.y + z * other.z
+
+    fun slerpTo(target: Quaternion, alpha: Float): Quaternion {
+        val t = alpha.coerceIn(0f, 1f)
+        var end = target
+        var cosTheta = dot(target)
+
+        if (cosTheta < 0f) {
+            end = Quaternion(-target.w, -target.x, -target.y, -target.z)
+            cosTheta = -cosTheta
+        }
+
+        if (cosTheta > 0.9995f) {
+            return Quaternion(
+                w = w + t * (end.w - w),
+                x = x + t * (end.x - x),
+                y = y + t * (end.y - y),
+                z = z + t * (end.z - z),
+            ).normalized()
+        }
+
+        val theta = kotlin.math.acos(cosTheta.toDouble()).toFloat()
+        val sinTheta = sin(theta)
+        if (sinTheta <= 1e-6f) {
+            return end.normalized()
+        }
+
+        val weightA = sin((1f - t) * theta) / sinTheta
+        val weightB = sin(t * theta) / sinTheta
+        return Quaternion(
+            w = weightA * w + weightB * end.w,
+            x = weightA * x + weightB * end.x,
+            y = weightA * y + weightB * end.y,
+            z = weightA * z + weightB * end.z,
+        ).normalized()
+    }
 
     operator fun times(other: Quaternion): Quaternion = Quaternion(
         w = w * other.w - x * other.x - y * other.y - z * other.z,

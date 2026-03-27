@@ -50,6 +50,7 @@ class ImuCalibrationViewModel @Inject constructor(
     private val sampleTimesMs = ArrayDeque<Long>()
     private val frameTimesMs = ArrayDeque<Long>()
     private var lastBoardQuaternion: Quaternion? = null
+    private var filteredBoardQuaternion: Quaternion? = null
     private var boardReferenceQuaternion: Quaternion = Quaternion.Identity
     private var preferBoardAttitude: Boolean = false
 
@@ -102,6 +103,7 @@ class ImuCalibrationViewModel @Inject constructor(
     fun resetViewer() {
         estimator.resetAll()
         lastBoardQuaternion = null
+        filteredBoardQuaternion = null
         boardReferenceQuaternion = Quaternion.Identity
         preferBoardAttitude = false
         sampleTimesMs.clear()
@@ -177,7 +179,12 @@ class ImuCalibrationViewModel @Inject constructor(
             z = sample.qzQ30.toFloat() / (1 shl 30).toFloat(),
         ).normalized()
         lastBoardQuaternion = boardQuat
-        val displayQuat = (boardReferenceQuaternion.conjugate() * boardQuat).normalized()
+        val smoothingAlpha = if (sample.moving) BOARD_SMOOTHING_MOVING_ALPHA else BOARD_SMOOTHING_STILL_ALPHA
+        val smoothedBoardQuat = filteredBoardQuaternion
+            ?.slerpTo(boardQuat, smoothingAlpha)
+            ?: boardQuat
+        filteredBoardQuaternion = smoothedBoardQuat
+        val displayQuat = (boardReferenceQuaternion.conjugate() * smoothedBoardQuat).normalized()
         val (roll, pitch, yaw) = displayQuat.toEulerDegrees()
         _uiState.value = _uiState.value.copy(
             quaternion = displayQuat,
@@ -188,5 +195,10 @@ class ImuCalibrationViewModel @Inject constructor(
             biasReady = sample.biasReady || sample.gyrAccuracy >= 2,
             viewerFps = viewerFps,
         )
+    }
+
+    private companion object {
+        const val BOARD_SMOOTHING_STILL_ALPHA = 0.14f
+        const val BOARD_SMOOTHING_MOVING_ALPHA = 0.32f
     }
 }
