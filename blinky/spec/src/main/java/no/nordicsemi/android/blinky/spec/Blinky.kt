@@ -51,6 +51,11 @@ interface Blinky {
     val attitudeSample: StateFlow<AttitudeSample?>
 
     /**
+     * Latest motion/action sample received from nRF.
+     */
+    val imuMotionSample: StateFlow<ImuMotionSample?>
+
+    /**
      * Audio stream statistics.
      */
     val audioStats: StateFlow<AudioStats>

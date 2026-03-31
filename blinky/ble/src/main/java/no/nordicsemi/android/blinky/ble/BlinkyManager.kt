@@ -42,6 +42,7 @@ import no.nordicsemi.android.blinky.spec.ConversationState
 import no.nordicsemi.android.blinky.spec.GpsData
 import no.nordicsemi.android.blinky.spec.GpsState
 import no.nordicsemi.android.blinky.spec.GrpcStatusStore
+import no.nordicsemi.android.blinky.spec.ImuMotionSample
 import no.nordicsemi.android.blinky.spec.ImuRawSample
 import timber.log.Timber
 import java.io.ByteArrayOutputStream
@@ -150,6 +151,9 @@ private class BlinkyManagerImpl(
 
     private val _attitudeSample = MutableStateFlow<AttitudeSample?>(null)
     override val attitudeSample = _attitudeSample.asStateFlow()
+
+    private val _imuMotionSample = MutableStateFlow<ImuMotionSample?>(null)
+    override val imuMotionSample = _imuMotionSample.asStateFlow()
 
     private val _audioStats = MutableStateFlow(AudioStats())
     override val audioStats = _audioStats.asStateFlow()
@@ -268,7 +272,7 @@ private class BlinkyManagerImpl(
     private val bitsPerSample = 16
     private val useBleMic = true
     private val useNrfSpeaker = true
-    private var nrfSpeakerVolumePercent = 460
+    private var nrfSpeakerVolumePercent = 500
     private val playbackFrameBytes = (sampleRateHz / 50) * channels * (bitsPerSample / 8)
     private var playbackStartFrames = 20  // ~400ms
     private var playbackLowFrames = 10    // ~200ms
@@ -464,6 +468,7 @@ private class BlinkyManagerImpl(
         _imuCalibrationResult.value = null
         _imuRawSample.value = null
         _attitudeSample.value = null
+        _imuMotionSample.value = null
 
         val wasConnected = isReady
         // If the device wasn't connected, it means that ConnectRequest was still pending.
@@ -579,6 +584,7 @@ private class BlinkyManagerImpl(
         _imuCalibrationResult.value = null
         _imuRawSample.value = null
         _attitudeSample.value = null
+        _imuMotionSample.value = null
         speexDsp.close()
         downlinkSpeexDsp.close()
         downlinkResampler.close()
@@ -1478,9 +1484,9 @@ private class BlinkyManagerImpl(
         if (peak <= 0 || rmsPower <= 0) return pcm16
 
         val rms = kotlin.math.sqrt(rmsPower.toDouble())
-        val targetPeak = 32500.0
-        val targetRms = 26000.0
-        val maxGain = 12.0
+        val targetPeak = 32100.0
+        val targetRms = 25500.0
+        val maxGain = 10.0
         val gain = minOf(maxGain, targetPeak / peak.toDouble(), targetRms / rms)
         if (gain <= 1.02) return pcm16
 
@@ -1494,17 +1500,17 @@ private class BlinkyManagerImpl(
 
             var y = v.toDouble() * gain
             val ay = kotlin.math.abs(y)
-            if (ay > 21000.0) {
+            if (ay > 20500.0) {
                 val sign = if (y >= 0.0) 1.0 else -1.0
-                val over = ay - 21000.0
-                val compressed = 21000.0 + over / 2.8
+                val over = ay - 20500.0
+                val compressed = 20500.0 + over / 2.7
                 y = sign * compressed
             }
 
             val az = kotlin.math.abs(y)
-            if (az > 32000.0) {
-                val over = az - 32000.0
-                val compressed = 32000.0 + over * 0.008
+            if (az > 31900.0) {
+                val over = az - 31900.0
+                val compressed = 31900.0 + over * 0.006
                 y = if (y >= 0.0) compressed else -compressed
             }
 
@@ -1634,6 +1640,12 @@ private class BlinkyManagerImpl(
                     if (type == 2 && payloadLen >= 10) {
                         val action = u8(bytes, payloadOff + 4)
                         val conf = u8(bytes, payloadOff + 5)
+                        _imuMotionSample.value = ImuMotionSample(
+                            seq = seq,
+                            action = action,
+                            confidence = conf,
+                            receivedAtMs = now,
+                        )
                         val imuLine =
                             "${now},IMU,seq=${seq},action=${imuActionName(action)},conf=${conf}"
                         dataLogger.append(imuLine)

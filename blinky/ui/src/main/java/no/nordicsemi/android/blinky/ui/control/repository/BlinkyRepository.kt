@@ -69,6 +69,9 @@ class BlinkyRepository @Inject constructor(
     override val attitudeSample: StateFlow<no.nordicsemi.android.blinky.spec.AttitudeSample?>
         get() = blinky.attitudeSample
 
+    override val imuMotionSample: StateFlow<no.nordicsemi.android.blinky.spec.ImuMotionSample?>
+        get() = blinky.imuMotionSample
+
     override val audioStats: StateFlow<no.nordicsemi.android.blinky.spec.AudioStats>
         get() = blinky.audioStats
 
