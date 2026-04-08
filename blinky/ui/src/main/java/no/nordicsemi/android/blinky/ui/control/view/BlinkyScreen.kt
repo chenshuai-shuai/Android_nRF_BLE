@@ -104,14 +104,17 @@ internal fun BlinkyScreen(
                     val imuMessages = rxMessages.filter {
                         it.startsWith("IMU ") || it.startsWith("IMU_RAW ")
                     }
+                    val tempMessages = rxMessages.filter { it.startsWith("TEMP ") }
                     val gpsMessages = rxMessages.filter { it.startsWith("GPS ") }
                     val lastPpg = ppgMessages.lastOrNull()
                     val lastImu = imuMessages.lastOrNull()
+                    val lastTemp = tempMessages.lastOrNull()
                     val lastGps = gpsMessages.lastOrNull()
                     val sensorMessages = rxMessages.filter {
                         it.startsWith("PPG ") ||
                             it.startsWith("IMU ") ||
                             it.startsWith("IMU_RAW ") ||
+                            it.startsWith("TEMP ") ||
                             it.startsWith("GPS ")
                     }
 
@@ -246,6 +249,9 @@ internal fun BlinkyScreen(
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(text = "IMU Data")
                         Text(text = lastImu ?: "(no imu data)")
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(text = "Temp Data")
+                        Text(text = lastTemp ?: "(no temp data)")
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(text = "GPS Data")
                         when (gpsState) {

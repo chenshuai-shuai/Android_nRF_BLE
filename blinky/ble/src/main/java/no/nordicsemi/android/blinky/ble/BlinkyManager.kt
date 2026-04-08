@@ -284,6 +284,7 @@ private class BlinkyManagerImpl(
     private var lastPpgMsgMs: Long = 0L
     private var lastImuMsgMs: Long = 0L
     private var lastImuRawMsgMs: Long = 0L
+    private var lastTempMsgMs: Long = 0L
     private var lastGpsMsgMs: Long = 0L
     private var lastSensorGrpcLogMs: Long = 0L
     @Volatile private var lastPpgLine: String? = null
@@ -373,6 +374,7 @@ private class BlinkyManagerImpl(
         private const val APP_DATA_PART_PPG = 3
         private const val APP_DATA_PART_IMU = 4
         private const val APP_DATA_PART_ATTITUDE = 6
+        private const val APP_DATA_PART_TEMP = 7
         private const val ATTITUDE_FLAG_VALID = 0x01
         private const val ATTITUDE_FLAG_MOVING = 0x02
         private const val ATTITUDE_FLAG_BIAS_READY = 0x04
@@ -1808,6 +1810,30 @@ private class BlinkyManagerImpl(
                             appendRxMessage(
                                 "ATT seq=${seq} acc=${sample.accAccuracy} gyr=${sample.gyrAccuracy} " +
                                     "moving=${sample.moving} bias=${sample.biasReady}"
+                            )
+                        }
+                    }
+                }
+                return true
+            }
+            APP_DATA_PART_TEMP -> {
+                if (payloadLen >= 14) {
+                    val ver = u8(bytes, payloadOff)
+                    val type = u8(bytes, payloadOff + 1)
+                    if (ver == 1 && type == 1) {
+                        val seq = le16(bytes, payloadOff + 2)
+                        val raw = leI16(bytes, payloadOff + 4)
+                        val microC = leI32(bytes, payloadOff + 6)
+                        val deviceTsMs = le32(bytes, payloadOff + 10).toLong() and 0xFFFFFFFFL
+                        val now = System.currentTimeMillis()
+                        val tempLine =
+                            "${now},TEMP,seq=${seq},raw=${raw},micro_c=${microC},device_ts=${deviceTsMs}"
+                        dataLogger.append(tempLine)
+                        if (now - lastTempMsgMs >= 1000L) {
+                            lastTempMsgMs = now
+                            val absMicro = kotlin.math.abs(microC)
+                            appendRxMessage(
+                                "TEMP seq=${seq} temp=${microC / 1000000}.${(absMicro % 1000000 / 100).toString().padStart(4, '0')}C raw=${raw}"
                             )
                         }
                     }
