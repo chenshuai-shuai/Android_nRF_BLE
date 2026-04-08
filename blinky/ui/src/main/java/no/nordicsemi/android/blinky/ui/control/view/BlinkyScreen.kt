@@ -3,12 +3,17 @@ package no.nordicsemi.android.blinky.ui.control.view
 import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -19,6 +24,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -26,6 +32,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import no.nordicsemi.android.blinky.spec.Blinky
 import no.nordicsemi.android.blinky.spec.ConversationState
+import no.nordicsemi.android.blinky.spec.GpsData
+import no.nordicsemi.android.blinky.spec.GpsState
 import no.nordicsemi.android.blinky.ui.R
 import no.nordicsemi.android.blinky.ui.control.BlinkyDevice
 import no.nordicsemi.android.blinky.ui.control.viewmodel.BlinkyViewModel
@@ -126,51 +134,71 @@ internal fun BlinkyScreen(
                             .widthIn(max = 460.dp)
                             .padding(16.dp)
                     ) {
-                        Text(text = "Conversation: $conversationState")
-                        if (sessionId != null) {
-                            Text(text = "Session: $sessionId")
-                        }
-                        Text(text = "Session Ready: ${if (sessionReady) "YES" else "NO"}")
-                        Text(text = "Realtime Service: ${if (realtimeServiceEnabled) "ON" else "OFF"}")
-                        if (conversationState == ConversationState.WAITING_RESPONSE) {
-                            Text(text = "Waiting reply: ${waitingSeconds}s")
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(modifier = Modifier.padding(bottom = 8.dp)) {
-                            Button(
-                                onClick = {
-                                    if (realtimeServiceEnabled) {
-                                        viewModel.stopRealtimeService()
-                                    } else {
-                                        viewModel.startRealtimeService()
-                                    }
-                                },
-                                enabled = conversationState != ConversationState.CONNECTING
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1f)
                             ) {
-                                Text(
-                                    text = if (realtimeServiceEnabled) {
-                                        "Stop Realtime Service"
-                                    } else {
-                                        "Start Realtime Service"
-                                    }
-                                )
-                            }
-                        }
-                        Row(modifier = Modifier.padding(bottom = 8.dp)) {
-                            Button(onClick = onOpenRuntimeLog) {
-                                Text(text = "Open Runtime Log")
-                            }
-                        }
-                        Row(modifier = Modifier.padding(bottom = 8.dp)) {
-                            Button(
-                                onClick = {
-                                    onOpenImuCalibration(BlinkyDevice(viewModel.device, viewModel.deviceName))
+                                Text(text = "Conversation: $conversationState")
+                                if (sessionId != null) {
+                                    Text(text = "Session: $sessionId")
                                 }
+                                Text(text = "Session Ready: ${if (sessionReady) "YES" else "NO"}")
+                                Text(text = "Realtime Service: ${if (realtimeServiceEnabled) "ON" else "OFF"}")
+                                if (conversationState == ConversationState.WAITING_RESPONSE) {
+                                    Text(text = "Waiting reply: ${waitingSeconds}s")
+                                }
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(modifier = Modifier.padding(bottom = 8.dp)) {
+                                    Button(
+                                        onClick = {
+                                            if (realtimeServiceEnabled) {
+                                                viewModel.stopRealtimeService()
+                                            } else {
+                                                viewModel.startRealtimeService()
+                                            }
+                                        },
+                                        enabled = conversationState != ConversationState.CONNECTING
+                                    ) {
+                                        Text(
+                                            text = if (realtimeServiceEnabled) {
+                                                "Stop Realtime Service"
+                                            } else {
+                                                "Start Realtime Service"
+                                            }
+                                        )
+                                    }
+                                }
+                                Row(modifier = Modifier.padding(bottom = 8.dp)) {
+                                    Button(onClick = onOpenRuntimeLog) {
+                                        Text(text = "Open Runtime Log")
+                                    }
+                                }
+                                Row(modifier = Modifier.padding(bottom = 8.dp)) {
+                                    Button(
+                                        onClick = {
+                                            onOpenImuCalibration(BlinkyDevice(viewModel.device, viewModel.deviceName))
+                                        }
+                                    ) {
+                                        Text(text = "Open IMU 3D Viewer")
+                                    }
+                                }
+                            }
+
+                            SensorSummaryCard(
+                                modifier = Modifier.weight(1f),
+                                lastPpg = lastPpg,
+                                gpsState = gpsState,
+                                gpsData = gpsData,
                             ) {
-                                Text(text = "Open IMU 3D Viewer")
+                                viewModel.refreshGps()
                             }
                         }
 
+                        Spacer(modifier = Modifier.height(8.dp))
                         Text(text = "gRPC Status: $grpcState")
                         if (grpcLastMessage != null) {
                             Text(text = "gRPC Last: $grpcLastMessage")
@@ -280,4 +308,99 @@ internal fun BlinkyScreen(
             }
         }
     }
+}
+
+@Composable
+private fun SensorSummaryCard(
+    modifier: Modifier = Modifier,
+    lastPpg: String?,
+    gpsState: GpsState,
+    gpsData: GpsData?,
+    onRetryGps: () -> Unit,
+) {
+    val spo2Hb = lastPpg.metricIntValue("spo2_hb")
+    val hr = if (spo2Hb != null && spo2Hb > 0) {
+        spo2Hb.toString()
+    } else {
+        lastPpg.metricValue("hr")
+    }
+    val hrv = lastPpg.metricValue("hrv")
+    val spo2 = lastPpg.metricValue("spo2")
+    val gpsPrimary = when (gpsState) {
+        GpsState.READY -> gpsData?.let { "${"%.6f".format(it.lat)}, ${"%.6f".format(it.lon)}" } ?: "--"
+        GpsState.SEARCHING -> "searching..."
+        GpsState.LOCATION_OFF -> "location off"
+        GpsState.PERMISSION_DENIED -> "permission denied"
+        GpsState.UNAVAILABLE -> "unavailable"
+    }
+
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp)
+        ) {
+            Text(
+                text = "Realtime Sensors",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            SensorMetric(label = "Heart Rate", value = hr ?: "--", suffix = "bpm")
+            Spacer(modifier = Modifier.height(10.dp))
+            SensorMetric(label = "HRV", value = hrv ?: "--", suffix = "ms")
+            Spacer(modifier = Modifier.height(10.dp))
+            SensorMetric(label = "SpO2", value = spo2 ?: "--", suffix = "%")
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "GPS",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                text = gpsPrimary,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium
+            )
+            if (gpsState == GpsState.LOCATION_OFF) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(onClick = onRetryGps) {
+                    Text(text = "Retry GPS")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SensorMetric(
+    label: String,
+    value: String,
+    suffix: String,
+) {
+    Column {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Text(
+            text = if (value == "--") value else "$value $suffix",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+private fun String?.metricValue(key: String): String? {
+    if (this == null) return null
+    val match = Regex("""\b$key=([^\s]+)""").find(this) ?: return null
+    return match.groupValues.getOrNull(1)
+}
+
+private fun String?.metricIntValue(key: String): Int? {
+    return this.metricValue(key)?.toIntOrNull()
 }

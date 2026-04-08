@@ -315,6 +315,16 @@ private class BlinkyManagerImpl(
     private var downlinkHpY1 = 0f
     private var downlinkLpY1 = 0f
     private var downlinkCompEnv = 0f
+    private var uplinkHpX1 = 0f
+    private var uplinkHpY1 = 0f
+    private var uplinkNotch50X1 = 0f
+    private var uplinkNotch50X2 = 0f
+    private var uplinkNotch50Y1 = 0f
+    private var uplinkNotch50Y2 = 0f
+    private var uplinkNotch100X1 = 0f
+    private var uplinkNotch100X2 = 0f
+    private var uplinkNotch100Y1 = 0f
+    private var uplinkNotch100Y2 = 0f
     private var uplinkNoiseFloor = 300f
     private var uplinkGainSmooth = 1.0f
 
@@ -459,6 +469,7 @@ private class BlinkyManagerImpl(
         _conversationState.value = ConversationState.IDLE
         recordBuffer.reset()
         recordingActive = false
+        resetUplinkSpeechPipeline()
         _recording.value = false
         dataLogger.stop()
         _sensorLogging.value = false
@@ -796,6 +807,7 @@ private class BlinkyManagerImpl(
 
     override suspend fun startRecording() {
         recordBuffer.reset()
+        resetUplinkSpeechPipeline()
         recordingActive = true
         _recording.value = true
         _lastSavedPath.value = "RECORDING_STARTED"
@@ -1065,6 +1077,7 @@ private class BlinkyManagerImpl(
 
     override suspend fun startRealtimeService() {
         _realtimeServiceEnabled.value = true
+        resetUplinkSpeechPipeline()
         requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH).enqueue()
         if (sessionId == null || _conversationState.value == ConversationState.IDLE) {
             startConversation()
@@ -1140,11 +1153,7 @@ private class BlinkyManagerImpl(
                     val sendSeq = seq.toLong()
                     val decoded = decodeNrfAudioFrame(frameBytes)
                     if (decoded != null) {
-                        val processedBase = if (useSpeexDsp && decoded.second == 16000) {
-                            speexDsp.processPcm16le(decoded.first)
-                        } else {
-                            decoded.first
-                        }
+                        val processedBase = decoded.first
                         val processed = if (decoded.second == 16000) {
                             enhanceUplinkVoicePcm16le(processedBase)
                         } else {
@@ -1257,16 +1266,65 @@ private class BlinkyManagerImpl(
         return Pair(out, sampleRate)
     }
 
+    private fun resetUplinkSpeechPipeline() {
+        uplinkHpX1 = 0f
+        uplinkHpY1 = 0f
+        uplinkNotch50X1 = 0f
+        uplinkNotch50X2 = 0f
+        uplinkNotch50Y1 = 0f
+        uplinkNotch50Y2 = 0f
+        uplinkNotch100X1 = 0f
+        uplinkNotch100X2 = 0f
+        uplinkNotch100Y1 = 0f
+        uplinkNotch100Y2 = 0f
+        uplinkNoiseFloor = 300f
+        uplinkGainSmooth = 1.0f
+    }
+
+    private fun applyUplinkHumFilter(sample: Float): Float {
+        val hp = sample - uplinkHpX1 + 0.985f * uplinkHpY1
+        uplinkHpX1 = sample
+        uplinkHpY1 = hp
+
+        val c50 = 1.9992291f
+        val r50 = 0.992f
+        var y = hp -
+            c50 * uplinkNotch50X1 +
+            uplinkNotch50X2 +
+            (r50 * c50) * uplinkNotch50Y1 -
+            (r50 * r50) * uplinkNotch50Y2
+        uplinkNotch50X2 = uplinkNotch50X1
+        uplinkNotch50X1 = hp
+        uplinkNotch50Y2 = uplinkNotch50Y1
+        uplinkNotch50Y1 = y
+
+        val c100 = 1.9969174f
+        val r100 = 0.990f
+        val z = y -
+            c100 * uplinkNotch100X1 +
+            uplinkNotch100X2 +
+            (r100 * c100) * uplinkNotch100Y1 -
+            (r100 * r100) * uplinkNotch100Y2
+        uplinkNotch100X2 = uplinkNotch100X1
+        uplinkNotch100X1 = y
+        uplinkNotch100Y2 = uplinkNotch100Y1
+        uplinkNotch100Y1 = z
+
+        return z
+    }
+
     private fun enhanceUplinkVoicePcm16le(pcm16: ByteArray): ByteArray {
         if (pcm16.size < 2 || (pcm16.size and 1) != 0) return pcm16
 
         val out = ByteArray(pcm16.size)
         val samples = pcm16.size / 2
+        val filtered = FloatArray(samples)
         var peak = 0f
         var sumSq = 0f
 
         for (i in 0 until samples) {
-            val s = leI16(pcm16, i * 2).toFloat()
+            val s = applyUplinkHumFilter(leI16(pcm16, i * 2).toFloat())
+            filtered[i] = s
             val a = kotlin.math.abs(s)
             if (a > peak) peak = a
             sumSq += s * s
@@ -1275,45 +1333,40 @@ private class BlinkyManagerImpl(
         if (samples == 0) return pcm16
 
         val rms = kotlin.math.sqrt(sumSq / samples.toFloat())
-        val speechThreshold = kotlin.math.max(650f, uplinkNoiseFloor * 2.3f)
-        val speechLikely = peak >= 2200f || rms >= speechThreshold
+        val speechThreshold = kotlin.math.max(520f, uplinkNoiseFloor * 1.90f)
+        val speechLikely = peak >= 1800f || rms >= speechThreshold
 
         uplinkNoiseFloor = if (speechLikely) {
-            uplinkNoiseFloor * 0.995f + rms * 0.005f
+            uplinkNoiseFloor * 0.998f + rms * 0.002f
         } else {
-            uplinkNoiseFloor * 0.94f + rms * 0.06f
+            uplinkNoiseFloor * 0.97f + rms * 0.03f
         }.coerceIn(180f, 2200f)
 
-        val targetRms = 9500f
+        val targetRms = 9800f
         val rawGain = if (speechLikely && rms > 1f) {
-            (targetRms / rms).coerceIn(1.15f, 4.2f)
+            (targetRms / rms).coerceIn(1.0f, 2.8f)
         } else {
             1.0f
         }
 
         uplinkGainSmooth = if (rawGain > uplinkGainSmooth) {
-            uplinkGainSmooth * 0.80f + rawGain * 0.20f
+            uplinkGainSmooth * 0.90f + rawGain * 0.10f
         } else {
-            uplinkGainSmooth * 0.92f + rawGain * 0.08f
-        }.coerceIn(1.0f, 4.2f)
+            uplinkGainSmooth * 0.97f + rawGain * 0.03f
+        }.coerceIn(1.0f, 2.8f)
 
         val gain = uplinkGainSmooth
         for (i in 0 until samples) {
-            val s = leI16(pcm16, i * 2).toFloat()
-            val a = kotlin.math.abs(s)
-            var y = if (speechLikely || a >= speechThreshold * 0.70f) {
-                s * gain
-            } else {
-                s * 0.92f
-            }
+            val s = filtered[i]
+            var y = s * gain
 
             val ay = kotlin.math.abs(y)
             if (ay > 18000f) {
                 val excess = ay - 18000f
-                val compressed = 18000f + excess * 0.35f
+                val compressed = 18000f + excess * 0.34f
                 y = if (y >= 0f) compressed else -compressed
             }
-            y = y.coerceIn(-30000f, 30000f)
+            y = y.coerceIn(-29000f, 29000f)
 
             val iv = y.toInt()
             out[i * 2] = (iv and 0xFF).toByte()
@@ -1610,23 +1663,32 @@ private class BlinkyManagerImpl(
         when (part) {
             APP_DATA_PART_PPG -> {
                 if (payloadLen >= 14) {
+                    val ppgVer = u8(bytes, payloadOff)
                     val hr = leI16(bytes, payloadOff + 2)
                     val conf = leI16(bytes, payloadOff + 4)
                     val snr = leI16(bytes, payloadOff + 6)
                     val frameId = le32(bytes, payloadOff + 8)
                     val hrv = if (payloadLen >= 18) leI16(bytes, payloadOff + 16) else 0
                     val hrvConf = if (payloadLen >= 20) leI16(bytes, payloadOff + 18) else 0
+                    val spo2 = if (ppgVer >= 2 && payloadLen >= 22) leI16(bytes, payloadOff + 20) else 0
+                    val spo2Conf = if (ppgVer >= 2 && payloadLen >= 24) leI16(bytes, payloadOff + 22) else 0
+                    val spo2Valid = if (ppgVer >= 2 && payloadLen >= 26) leI16(bytes, payloadOff + 24) else 0
+                    val spo2Invalid = if (ppgVer >= 2 && payloadLen >= 28) leI16(bytes, payloadOff + 26) else 0
+                    val spo2Hb = if (ppgVer >= 3 && payloadLen >= 30) leI16(bytes, payloadOff + 28) else 0
                     val now = System.currentTimeMillis()
                     if (hr in 20..260) {
-                        GrpcSensorClient.updatePpg(hr, hrv)
+                        GrpcSensorClient.updatePpg(hr, hrv, spo2.toFloat())
                     }
                     val ppgLine =
-                        "${now},PPG,hr=${hr},hrv=${hrv},hrv_conf=${hrvConf},conf=${conf},snr=${snr},frame=${frameId}"
+                        "${now},PPG,hr=${hr},spo2_hb=${spo2Hb},spo2=${spo2},spo2_conf=${spo2Conf},spo2_valid=${spo2Valid},spo2_invalid=${spo2Invalid},hrv=${hrv},hrv_conf=${hrvConf},conf=${conf},snr=${snr},frame=${frameId}"
                     dataLogger.append(ppgLine)
                     lastPpgLine = ppgLine
                     if (now - lastPpgMsgMs >= 1000L) {
                         lastPpgMsgMs = now
-                        appendRxMessage("PPG hr=${hr} hrv=${hrv} hrv_conf=${hrvConf} conf=${conf} snr=${snr} frame=${frameId}")
+                        appendRxMessage(
+                            "PPG hr=${hr} spo2_hb=${spo2Hb} spo2=${spo2} spo2_conf=${spo2Conf} " +
+                                "hrv=${hrv} hrv_conf=${hrvConf} conf=${conf} snr=${snr} frame=${frameId}"
+                        )
                     }
                 }
                 return true
@@ -1760,20 +1822,33 @@ private class BlinkyManagerImpl(
 
     private fun handleRawSensorPacket(bytes: ByteArray): Boolean {
         // Fallback compatibility: allow raw sensor payloads without uplink wire header.
-        if (bytes.size >= 20 && u8(bytes, 0) == 1 && u8(bytes, 1) == 1) {
+        if (bytes.size >= 20 && u8(bytes, 0) in 1..2 && u8(bytes, 1) == 1) {
+            val ppgVer = u8(bytes, 0)
             val hr = leI16(bytes, 2)
             val conf = leI16(bytes, 4)
             val snr = leI16(bytes, 6)
             val frameId = le32(bytes, 8)
             val hrv = leI16(bytes, 16)
             val hrvConf = leI16(bytes, 18)
+            val spo2 = if (ppgVer >= 2 && bytes.size >= 22) leI16(bytes, 20) else 0
+            val spo2Conf = if (ppgVer >= 2 && bytes.size >= 24) leI16(bytes, 22) else 0
+            val spo2Valid = if (ppgVer >= 2 && bytes.size >= 26) leI16(bytes, 24) else 0
+            val spo2Invalid = if (ppgVer >= 2 && bytes.size >= 28) leI16(bytes, 26) else 0
+            val spo2Hb = if (ppgVer >= 3 && bytes.size >= 30) leI16(bytes, 28) else 0
             val now = System.currentTimeMillis()
             if (hr in 20..260) {
-                GrpcSensorClient.updatePpg(hr, hrv)
+                GrpcSensorClient.updatePpg(hr, hrv, spo2.toFloat())
             }
+            val ppgLine =
+                "${now},PPG,hr=${hr},spo2_hb=${spo2Hb},spo2=${spo2},spo2_conf=${spo2Conf},spo2_valid=${spo2Valid},spo2_invalid=${spo2Invalid},hrv=${hrv},hrv_conf=${hrvConf},conf=${conf},snr=${snr},frame=${frameId}"
+            dataLogger.append(ppgLine)
+            lastPpgLine = ppgLine
             if (now - lastPpgMsgMs >= 1000L) {
                 lastPpgMsgMs = now
-                appendRxMessage("PPG hr=${hr} hrv=${hrv} hrv_conf=${hrvConf} conf=${conf} snr=${snr} frame=${frameId} (raw)")
+                appendRxMessage(
+                    "PPG hr=${hr} spo2_hb=${spo2Hb} spo2=${spo2} spo2_conf=${spo2Conf} " +
+                        "hrv=${hrv} hrv_conf=${hrvConf} conf=${conf} snr=${snr} frame=${frameId} (raw)"
+                )
             }
             return true
         }

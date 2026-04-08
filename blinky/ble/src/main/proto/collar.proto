@@ -16,6 +16,7 @@ message SensorDataRequest {
   int32 hrv = 4;
   GpsCoordinates gps = 5;
   repeated IMUSample imu_samples = 6;
+  float spo2 = 7;
 }
 
 message GpsCoordinates {

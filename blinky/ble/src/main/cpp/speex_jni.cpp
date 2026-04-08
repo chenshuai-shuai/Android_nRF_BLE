@@ -38,23 +38,11 @@ static SpeexPreprocessState *create_preprocess_state(int sample_rate, int frame_
         int agc = 0;
         speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC, &agc);
     } else {
-        int noiseSuppress = -20;
+        int noiseSuppress = -30;
         speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &noiseSuppress);
 
-        int agc = 1;
+        int agc = 0;
         speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC, &agc);
-
-        float agcLevel = 20000.0f;
-        speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_LEVEL, &agcLevel);
-
-        int agcMaxGain = 36;
-        speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_MAX_GAIN, &agcMaxGain);
-
-        int inc = 18;
-        speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_INCREMENT, &inc);
-
-        int dec = 14;
-        speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_DECREMENT, &dec);
     }
 
     return st;

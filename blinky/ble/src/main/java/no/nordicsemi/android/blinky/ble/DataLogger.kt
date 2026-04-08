@@ -19,12 +19,18 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicInteger
 
 class DataLogger(
     private val context: Context,
 ) {
+    private companion object {
+        private const val MAX_QUEUED_LINES = 4000
+    }
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val queue = ConcurrentLinkedQueue<String>()
+    private val queuedLines = AtomicInteger(0)
     private var writerJob: Job? = null
     private var onSaved: ((String) -> Unit)? = null
     @Volatile private var enabled: Boolean = false
@@ -47,6 +53,7 @@ class DataLogger(
     fun stop() {
         if (!enabled && writerJob == null) {
             queue.clear()
+            queuedLines.set(0)
             return
         }
         enabled = false
@@ -58,18 +65,23 @@ class DataLogger(
     fun append(line: String) {
         if (!enabled) return
         queue.add(line)
+        val size = queuedLines.incrementAndGet()
+        trimQueue(size)
     }
 
     fun appendSnapshot(line: String) {
         if (!enabled) return
         // Always include at least one line for each sensor in a file if available.
         queue.add(line)
+        val size = queuedLines.incrementAndGet()
+        trimQueue(size)
     }
 
     private fun flushMinute() {
         val lines = ArrayList<String>()
         while (true) {
             val s = queue.poll() ?: break
+            queuedLines.updateAndGet { cur -> if (cur > 0) cur - 1 else 0 }
             lines.add(s)
         }
         if (lines.isEmpty()) return
@@ -114,6 +126,14 @@ class DataLogger(
             onSaved?.invoke(msg)
         } catch (t: Throwable) {
             Timber.tag("DataLogger").w("save failed: %s", t.message ?: "unknown")
+        }
+    }
+
+    private fun trimQueue(currentSize: Int) {
+        if (currentSize <= MAX_QUEUED_LINES) return
+        while (queuedLines.get() > MAX_QUEUED_LINES) {
+            queue.poll() ?: break
+            queuedLines.updateAndGet { cur -> if (cur > 0) cur - 1 else 0 }
         }
     }
 

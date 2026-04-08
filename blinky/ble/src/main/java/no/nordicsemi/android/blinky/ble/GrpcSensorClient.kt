@@ -40,6 +40,7 @@ object GrpcSensorClient {
 
     @Volatile private var latestHeartRate: Int? = null
     @Volatile private var latestHrv: Int? = null
+    @Volatile private var latestSpo2: Float? = null
     @Volatile private var latestLat: Double? = null
     @Volatile private var latestLon: Double? = null
     @Volatile private var running: Boolean = false
@@ -65,10 +66,11 @@ object GrpcSensorClient {
         this.intervalMs = intervalMs.coerceIn(500L, 10_000L)
     }
 
-    fun updatePpg(hr: Int, hrv: Int) {
+    fun updatePpg(hr: Int, hrv: Int, spo2: Float) {
         if (hr <= 0) return
         latestHeartRate = hr
         latestHrv = if (hrv >= 0) hrv else 0
+        latestSpo2 = if (spo2 >= 0f) spo2 else 0f
     }
 
     fun updateGps(lat: Double, lon: Double) {
@@ -104,11 +106,12 @@ object GrpcSensorClient {
                 try {
                     val hr = latestHeartRate
                     val hrv = latestHrv
+                    val spo2 = latestSpo2
                     val lat = latestLat
                     val lon = latestLon
-                    if (hr != null && hrv != null && lat != null && lon != null) {
+                    if (hr != null && hrv != null && spo2 != null && lat != null && lon != null) {
                         ensureStream()
-                        sendPacket(hr, hrv, lat, lon)
+                        sendPacket(hr, hrv, spo2, lat, lon)
                         reconnectBackoffMs = 1000L
                         val now = System.currentTimeMillis()
                         if (now - lastSummaryMs >= 10_000L) {
@@ -206,7 +209,7 @@ object GrpcSensorClient {
         Timber.tag(TAG).i("stream opened")
     }
 
-    private fun sendPacket(hr: Int, hrv: Int, lat: Double, lon: Double) {
+    private fun sendPacket(hr: Int, hrv: Int, spo2: Float, lat: Double, lon: Double) {
         val ts = isoUtcNow()
         val imuSamples = synchronized(imuLock) {
             if (imuBuffer.isEmpty()) {
@@ -222,6 +225,7 @@ object GrpcSensorClient {
             .setTimestamp(ts)
             .setHeartRate(hr)
             .setHrv(hrv)
+            .setSpo2(spo2)
             .setGps(
                 CollarProto.GpsCoordinates.newBuilder()
                     .setLat(lat)
@@ -254,11 +258,12 @@ object GrpcSensorClient {
             reconnectBackoffMs = 1000L
             nextReconnectAllowedAtMs = 0L
             Timber.tag(TAG).i(
-                "[SENSOR_TX] device_id=%s ts=%s hr=%d hrv=%d lat=%.6f lon=%.6f imu=%d",
+                "[SENSOR_TX] device_id=%s ts=%s hr=%d hrv=%d spo2=%.1f lat=%.6f lon=%.6f imu=%d",
                 deviceId,
                 ts,
                 hr,
                 hrv,
+                spo2,
                 lat,
                 lon,
                 imuSamples.size
