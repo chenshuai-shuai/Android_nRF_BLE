@@ -17,6 +17,7 @@ message SensorDataRequest {
   GpsCoordinates gps = 5;
   repeated IMUSample imu_samples = 6;
   float spo2 = 7;
+  float temperature_c = 8;
 }
 
 message GpsCoordinates {

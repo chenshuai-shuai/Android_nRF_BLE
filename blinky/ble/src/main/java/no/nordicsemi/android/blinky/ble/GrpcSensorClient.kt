@@ -43,6 +43,7 @@ object GrpcSensorClient {
     @Volatile private var latestSpo2: Float? = null
     @Volatile private var latestLat: Double? = null
     @Volatile private var latestLon: Double? = null
+    @Volatile private var latestTempC: Float? = null
     @Volatile private var running: Boolean = false
     private val imuLock = Any()
     private val imuBuffer: ArrayList<ImuSampleLite> = ArrayList(128)
@@ -76,6 +77,10 @@ object GrpcSensorClient {
     fun updateGps(lat: Double, lon: Double) {
         latestLat = lat
         latestLon = lon
+    }
+
+    fun updateTemp(tempC: Float) {
+        latestTempC = tempC
     }
 
     fun addImuSample(
@@ -220,12 +225,14 @@ object GrpcSensorClient {
                 copy
             }
         }
+        val tempC = latestTempC
         val req = CollarProto.SensorDataRequest.newBuilder()
             .setDeviceId(deviceId)
             .setTimestamp(ts)
             .setHeartRate(hr)
             .setHrv(hrv)
             .setSpo2(spo2)
+            .apply { if (tempC != null) setTemperatureC(tempC) }
             .setGps(
                 CollarProto.GpsCoordinates.newBuilder()
                     .setLat(lat)

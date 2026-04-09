@@ -191,14 +191,15 @@ internal fun BlinkyScreen(
                                 }
                             }
 
-                            SensorSummaryCard(
-                                modifier = Modifier.weight(1f),
-                                lastPpg = lastPpg,
-                                gpsState = gpsState,
-                                gpsData = gpsData,
-                            ) {
-                                viewModel.refreshGps()
-                            }
+                    SensorSummaryCard(
+                        modifier = Modifier.weight(1f),
+                        lastPpg = lastPpg,
+                        lastTemp = lastTemp,
+                        gpsState = gpsState,
+                        gpsData = gpsData,
+                    ) {
+                        viewModel.refreshGps()
+                    }
                         }
 
                         Spacer(modifier = Modifier.height(8.dp))
@@ -320,6 +321,7 @@ internal fun BlinkyScreen(
 private fun SensorSummaryCard(
     modifier: Modifier = Modifier,
     lastPpg: String?,
+    lastTemp: String?,
     gpsState: GpsState,
     gpsData: GpsData?,
     onRetryGps: () -> Unit,
@@ -360,6 +362,8 @@ private fun SensorSummaryCard(
             SensorMetric(label = "HRV", value = hrv ?: "--", suffix = "ms")
             Spacer(modifier = Modifier.height(10.dp))
             SensorMetric(label = "SpO2", value = spo2 ?: "--", suffix = "%")
+            Spacer(modifier = Modifier.height(10.dp))
+            SensorMetric(label = "Temperature", value = lastTemp.metricValue("temp")?.removeSuffix("C") ?: "--", suffix = "°C")
             Spacer(modifier = Modifier.height(10.dp))
             Text(
                 text = "GPS",

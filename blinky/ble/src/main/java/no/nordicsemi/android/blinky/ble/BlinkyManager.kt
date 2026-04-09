@@ -1826,6 +1826,8 @@ private class BlinkyManagerImpl(
                         val microC = leI32(bytes, payloadOff + 6)
                         val deviceTsMs = le32(bytes, payloadOff + 10).toLong() and 0xFFFFFFFFL
                         val now = System.currentTimeMillis()
+                        val tempC = microC / 1_000_000f
+                        GrpcSensorClient.updateTemp(tempC)
                         val tempLine =
                             "${now},TEMP,seq=${seq},raw=${raw},micro_c=${microC},device_ts=${deviceTsMs}"
                         dataLogger.append(tempLine)
