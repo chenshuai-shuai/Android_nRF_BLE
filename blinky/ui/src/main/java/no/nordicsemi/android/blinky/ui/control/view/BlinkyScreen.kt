@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -135,6 +137,7 @@ internal fun BlinkyScreen(
                     Column(
                         modifier = Modifier
                             .widthIn(max = 460.dp)
+                            .verticalScroll(rememberScrollState())
                             .padding(16.dp)
                     ) {
                         Row(
@@ -189,6 +192,13 @@ internal fun BlinkyScreen(
                                         Text(text = "Open IMU 3D Viewer")
                                     }
                                 }
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Esp32MaintenanceCard(
+                                    enabled = conversationState == ConversationState.IDLE &&
+                                        !realtimeServiceEnabled,
+                                    onEnterDownloadMode = { viewModel.enterEspDownloadMode() },
+                                    onBootNormalMode = { viewModel.bootEspNormalMode() }
+                                )
                             }
 
                     SensorSummaryCard(
@@ -313,6 +323,33 @@ internal fun BlinkyScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun Esp32MaintenanceCard(
+    enabled: Boolean,
+    onEnterDownloadMode: () -> Unit,
+    onBootNormalMode: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Button(
+            onClick = onEnterDownloadMode,
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(text = "Enter Download")
+        }
+        Button(
+            onClick = onBootNormalMode,
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(text = "Boot Normal")
         }
     }
 }

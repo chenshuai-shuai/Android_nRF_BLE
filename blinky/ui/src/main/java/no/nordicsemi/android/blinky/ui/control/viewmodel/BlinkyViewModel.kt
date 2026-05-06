@@ -141,6 +141,14 @@ class BlinkyViewModel @Inject constructor(
         }
     }
 
+    fun enterEspDownloadMode() {
+        sendMessage("NRF:ESP_DL")
+    }
+
+    fun bootEspNormalMode() {
+        sendMessage("NRF:ESP_BOOT")
+    }
+
     fun startRecording() {
         val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
         viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
